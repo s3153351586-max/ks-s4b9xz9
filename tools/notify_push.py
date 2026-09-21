@@ -1,24 +1,24 @@
-#！/usr/bin/env python3
-#-*-编码：utf-8-*-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-微信告警推送器(R16)
+微信告警推送器（R16）
 =====================
 职责边界
 --------
-publish_cloud.py--调查结果回档+决定“本轮该不适用推”(通知书态度)
+  publish_cloud.py —— 探测结果归档 + 决定「本轮该不该推」（通知状态机）
   本文件           —— 只负责「把结论变成人话并推出去」
 
 为什么单独成文件
 ----------------
-1.workflow的run:|块里内嵌多行python会破坏YAML缩进(R14踩过一次)，
+  1. workflow 的 run: | 块里内嵌多行 Python 会破坏 YAML 缩进（R14 踩过一次），
      所以逻辑一律落成脚本；
   2. 推送是本项目**唯一**会主动打扰用户的动作，值得单独测试；
   3. 推送失败必须**不阻断发布**（R16-4），独立进程天然满足这个隔离要求。
 
-文案设计(R16-2)
+文案设计（R16-2）
 -----------------
-复用户熟知的merge_on_phone.build_alert_text那一套措辞风格：
-·大白话定性--“源挂了”而不是"判决=source_dead"
+复用户熟知的 merge_on_phone.build_alert_text 那一套措辞风格：
+  · 大白话定性 —— 「源挂了」而不是「verdict=source_dead」
   · 处置建议   —— 告诉人下一步做什么，而不是只报症状
   · 家侧缺报时追加「家里视角请开电视人工确认」
 
@@ -26,63 +26,63 @@ publish_cloud.py--调查结果回档+决定“本轮该不适用推”(通知书
   家侧探针（手机 Termux）本身也可能停摆。与其让云端去猜「内网源是不是挂了」，
   不如诚实地说「我看不到家里，请你自己开电视看一眼」。这是一种**责任转移**：
   从「系统给一个可能是错的结论」变成「系统请求人给一个准确的结论」。
-因此：
-· 横幅灰/黄，不红（不确定 ≠ 故障）
+  因此：
+    · 横幅灰/黄，不红（不确定 ≠ 故障）
     · **不抑制公网告警**（R15 语义保持）—— 云端的结论依然独立成立
     · 文案追加人工确认提示
 
-依据（零字面量）
+凭据（零字面量）
 ----------------
-PUSHPLUS_TOKEN--只从环境变量读，代码里**没有任何token字体量**.
+  PUSHPLUS_TOKEN  —— 只从环境变量读，代码里**没有任何 token 字面量**。
   缺失时不报错、不推送、打印一行说明后返回 0（视为「未启用推送」，
   而非失败）。这样仓库公开也不会误伤——fork 的人没有 secret 时流程照常绿。
 
 用法：
-PUSHPLUS_TOKEN=xxxpython3notify_push.py--报告.json--状态状态。JSON
-python3notify_push.py--报告R.Json--状态.json---------------------------------------------------------只打印文案
-python3notify_push.py--状态s.json--每日#早报模式
+    PUSHPLUS_TOKEN=xxx python3 notify_push.py --report report.json --status status.json
+    python3 notify_push.py --report r.json --status s.json --dry-run   # 只打印文案
+    python3 notify_push.py --status s.json --daily                     # 早报模式
 """
-从……起__未来__进口注释
+from __future__ import annotations
 
-进口argparse
-importJSON
-import操作系统
-进口SSL
-importsys
-进口urllib。误差
-importurllib。请求
-从……起日期时间导入日期时间，时间增量，时区
-从……起键入导入任意、文字、列表、可选、元组
+import argparse
+import json
+import os
+import ssl
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-CST=时区(定时δ(小时=8))
+CST = timezone(timedelta(hours=8))
 
-#PushPlus接口（R16规格给定）。只写接口地址，token走环境变量.
-PUSHPLUS_ENDPOINT="https://www.pushplus.plus/send"
+# PushPlus 接口（R16 规格给定）。只写接口地址，token 走环境变量。
+PUSHPLUS_ENDPOINT = "https://www.pushplus.plus/send"
 
-#凭据环境变量名。工作流程里注入secrets.PUSH_TOKEN.
-env_TOKEN="PUSHPLUS_TOKEN"
+# 凭据环境变量名。workflow 里注入 secrets.PUSH_TOKEN。
+ENV_TOKEN = "PUSHPLUS_TOKEN"
 
-#网络超时：推送不该拖慢整个工作流程
-HTTP_TIMEOUT=10.0
+# 网络超时：推送不该拖慢整个 workflow
+HTTP_TIMEOUT = 10.0
 
 # 徽章：与看板/合并文案保持同一套图标语义
-icon_ALARM="🔴"
-icon_RECOVER="✅"
-icon_DAILY="📋"
+ICON_ALARM = "🔴"
+ICON_RECOVER = "✅"
+ICON_DAILY = "📋"
 
-#网络状态→人话（与probe_local.assess_network的语义对齐）
-network_TEXT={
-    "LAN_down": "家里网络断了（路由器 / 局域网）",
+# 网络状态 → 人话（与 probe_local.assess_network 的语义对齐）
+NETWORK_TEXT = {
+    "lan_down": "家里网络断了（路由器 / 局域网）",
     "wan_down": "宽带断了（运营商线路）",
     "net_ok": "本机网络健康",
     "net_unknown": "本机网络状态未知",
 }
 
-#告警id→人话定性+处置建议.
+# 告警 id → 人话定性 + 处置建议。
 # 这张表就是「大白话」的核心：左侧是机器判定，右侧是人真正需要知道的两件事
 # —— 出了什么事、我该干什么。
-alarm_PLAYBOOK:Dict[str，元组[str，str]]={
-    "网络": (
+ALARM_PLAYBOOK: Dict[str, Tuple[str, str]] = {
+    "NETWORK": (
         "家里网络本身断了（不是源的问题）",
         "先查路由器和宽带。网络恢复后源侧结论会自动重新生效。",
     ),
@@ -257,160 +257,159 @@ def send_pushplus(token: str, title: str, content: str,
     Returns:
         (ok, message)。ok=True 时 message 为服务端回执说明；否则为错误原因。
 
-加薪：
-#=============================================================== CLI
-返回 假的,
+    Raises:
         无。所有异常都被收敛成 (False, 原因) —— 推送失败不应该炸掉调用方，
-body=json。转储({
-}).编码("utf-8")
-"标题"：标题，
-"内容"：内容，
+        调用方需要的是「知道失败了」而不是「拿到一个异常」。
+    """
+    body = json.dumps({
+        "token": token,
+        "title": title,
+        "content": content,
         # 用 txt 模板：内容是给人读的纯文本，markdown 渲染反而会把
         # 「→」和缩进吃掉，导致排版散架。
-"模板"："文本"，
-}
+        "template": "txt",
+    }).encode("utf-8")
 
-req=urllib。请求.请求
-PUSHPLUS_ENDPOINT，
-data=body，
-标题={"内容类型"："应用程序/JSON"}，
-方法="邮件"，
-)
+    req = urllib.request.Request(
+        PUSHPLUS_ENDPOINT,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
 
-尝试:
-CTX=ssl.创建默认上下文()
-和……一起turllib。请求.urlopen(req，timeout=timeout，context=ctx)作为RESP：
-raw=resp.读().解码("utf-8"，错误="替换")
-除……之外urllib。误差.HttpError作为e：
-详细信息=""
-尝试:
-详图=e.读().解码("utf-8"，错误="替换")[：200]
-除……之外例外：#noqa:BLE001
-            通过
-返回假的，_磨合(F"HTTP{e.代码}{细节}"，令牌)
-_磨合
-返回 假的,
-返回假的，_磨合(f"{类型(e).__name__}：{e}"，令牌)
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:                       # noqa: BLE001
+            pass
+        return False, _scrub(f"HTTP {e.code} {detail}", token)
+    except Exception as e:                      # noqa: BLE001
+        # 网络层问题（DNS/TLS/超时）统一收敛
+        return False, _scrub(f"{type(e).__name__}: {e}", token)
 
-_磨合
-返回 假的,
-JS=json。负载(生的)
-，令牌
-返回假的，_磨合(F"回执非JSON：{生的[：200]}"，令牌)
+    # PushPlus 的成功回执是 {"code":200,"msg":"请求成功",...}
+    try:
+        js = json.loads(raw)
+    except ValueError:
+        return False, _scrub(f"回执非 JSON：{raw[:200]}", token)
 
-JS.得到
-得到
-JS.
-得到
+    code = js.get("code")
+    if code == 200:
+        return True, str(js.get("msg") or "ok")
+    return False, _scrub(f"code={code} msg={js.get('msg')}", token)
 
 
-定义 
+def _scrub(text: str, token: str) -> str:
     """
     从错误文本里抹掉 token。
 
-【为什么必要】PushPlus的报错有时会把token回显进msg，而这段文本会被
-写进状态/最新。JSON(公开仓库)和行动日志.凭据泄漏面必须堵死。
+    【为什么必要】PushPlus 的报错有时会把 token 回显进 msg，而这段文本会被
+    写进 status/latest.json（公开仓库）和 Actions 日志。凭据泄漏面必须堵死。
     """
-如果令牌：
-如果令牌：
-返回文本[:300]
+    if token:
+        text = text.replace(token, "***")
+    return text[:300]
 
 
-JS.
-Def_load_json(路径：可选择的[str])->可选[维克特[str，任意]]：_load_json(路径：可选[str])->可选[维克特[str，任意]]：
-如果不是path或不是os.路径.isFile(路径)：if不路径或不操作系统.路径.isFile(路径)：
-无返回返回没有一个
-试考：尝试：
-打开(路径，编码="utf-8")为F：带打开(路径，编码="utf-8")作为f：
-返回json.负载(f)返回JSON.负载(f)
-除……之外(OSError，ValueError)：除外(OSError，ValueError)：
-无返回返回没有一个
+# =============================================================== CLI
+def _load_json(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
-定义主要的()->int：主要的()->int：
-美联社=argparse.ArgumentParser(ArgumentParser(
-描述="R16微信告警推送(PushPlus).凭据只从环境变量""R16微信告警推送(PushPlus)。凭据只从环境变量"
-F"{env_TOKEN}读取，代码零字面量。")F"{env_TOKEN}读取，代码零字面量。")
-美联社。add_argument("--status"，required=True，add_argument("--status"，required=True，
-help="status/最新。json路径(含alarms/dictions/local_FRESHOOD)")"status/latest.JSON路径(含alarms/dictions/local_FRESHOOD)")
-ap.add_argument("--report"，默认值=None，add_argument("--report"，default=None，
-                    help="可选的探测报告（补充公网计数）")"可选的探测报告（补充公网计数）")
-美联社。add_argument("--kind"，默认值="first_alarm"，add_argument("--kind"，默认值="first_alarm"，
-choices=["first_alarm"，"recover"，"daily"]，["first_alarm"，"recover"，"daily"]，
-help="通知类型"(由publish_cloud的通知函方式决定)""通知类型(由publish_cloud的通知函方式决定）”）
-美联社。add_argument("--Daily"，action="store_true"，add_argument("--Daily"，action="store_true"，
-help="早报模式(r16-5)：内容汇率摘要，语气中性""早报模式(r16-5)：内容汇率摘要，语气中性""
-ap.add_argument("--pages-url"，默认值=无，帮助="看板地址，写进正文")add_argument("--pages-url"，默认值=无，帮助="看板地址，写进正文")
-美联社。add_argument("--dry-run"，action="store_true"，add_argument("--dry-run"，action="store_true"，
-帮助="只打印文案，不实际发送（不需要令牌)")"只打印文案，不实际发送（不需要 token）")
-ap.add_argument("--text-out"，默认值=无，帮助="把文案写到文件（便于本地核验）")add_argument("--text-out"，默认值=无，帮助="把文案写到文件（便于本地核验）")
-args=ap.parse_args()parse_args()
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="R16 微信告警推送（PushPlus）。凭据只从环境变量 "
+                    f"{ENV_TOKEN} 读取，代码零字面量。")
+    ap.add_argument("--status", required=True,
+                    help="status/latest.json 路径（含 alarms/verdicts/local_freshness）")
+    ap.add_argument("--report", default=None,
+                    help="可选的探测报告（补充公网计数）")
+    ap.add_argument("--kind", default="first_alarm",
+                    choices=["first_alarm", "recover", "daily"],
+                    help="通知类型（由 publish_cloud 的通知状态机决定）")
+    ap.add_argument("--daily", action="store_true",
+                    help="早报模式（R16-5）：内容为看板摘要，语气中性")
+    ap.add_argument("--pages-url", default=None, help="看板地址，写进正文")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只打印文案，不实际发送（不需要 token）")
+    ap.add_argument("--text-out", default=None, help="把文案写到文件（便于本地核验）")
+    args = ap.parse_args()
 
-status=_load_json(参数.status)_load_json(参数.状态)
-如果状态为“无”：如果状态为“无”：
-打印(f"[！]读不到状态：{args。状态}"，文件=sys.stderr)打印(f"[！]读不到状态：{args.status}"，文件=sys.stderr)
-返回2返回2
+    status = _load_json(args.status)
+    if status is None:
+        print(f"[!] 读不到 status：{args.status}", file=sys.stderr)
+        return 2
 
-#复用发布云(_C)的提炼逻辑，保证"决定推什么"与"推什么内容"#复用发布云(_C)的提炼逻辑，保证“决定推什么”与“推什么内容”
-# 永远读同一份数据，不会出现两处口径不一致。 # 永远读同一份数据，不会出现两处口径不一致。
-sys.路径。插入(0，os.路径.目录名(os.路径。aspath(__file__)))路径。插入(0，操作系统。路径。目录名(os.路径。aspath(__file__)))
-试考：尝试：
-将publish_cloud导入为PCimport publish_cloud as pc
-例外情况为e：#noqa:BLE001exception as e：#noqa:BLE001
-标
-返回2返回2
+    # 复用 publish_cloud 的提炼逻辑，保证「决定推什么」与「推什么内容」
+    # 永远读同一份数据，不会出现两处口径不一致。
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import publish_cloud as pc
+    except Exception as e:                      # noqa: BLE001
+        print(f"[!] 无法导入 publish_cloud：{e}", file=sys.stderr)
+        return 2
 
-有效负载=个人电脑。extract_push_content(状态)
-report=_load_json(参数报告)_load_json(参数。报告)
-如果报告：如果报告：
-CS=(报告.get("摘要")或{})(报告.get("摘要")或{})
-#只有状态里缺计数时才回退用报告(状态是权威来源）# 只有 status 里缺计数时才回退用 report（status 是权威来源）
-如果有效负载["cloud"].get("total_stream")为None：如果有效负载["cloud"].get("total_stream")为None：
-有效负载["cloud"].update({["cloud"].update({
-"ok_stream"：cs.get("ok_stream")，"ok_stream": cs.get("ok_stream"),
-"total_stream"：cs。get("total_stream")，"total_stream"：CS。get("total_stream")，
-"ok_list"：cs.get("ok_list")，"ok_list"：cs.get("ok_list")，
-"total_list"：cs。get("total_list")，"total_list"：CS。get("total_list")，
+    payload = pc.extract_push_content(status)
+    report = _load_json(args.report)
+    if report:
+        cs = (report.get("summary") or {})
+        # 只有 status 里缺计数时才回退用 report（status 是权威来源）
+        if payload["cloud"].get("total_stream") is None:
+            payload["cloud"].update({
+                "ok_stream": cs.get("ok_stream"),
+                "total_stream": cs.get("total_stream"),
+                "ok_list": cs.get("ok_list"),
+                "total_list": cs.get("total_list"),
             })
-payload["pages_url"]=args。pages_url或pc。default_PAGES_URL["pages_url"]=args。pages_url或pc.default_PAGES_URL
+    payload["pages_url"] = args.pages_url or pc.DEFAULT_PAGES_URL
 
-如果args.daily：如果args.daily：
-标题，内容=构建早期报告文本(有效负载)构建早期报告文本(有效负载)
-其他：其他：
-标题，内容=build_push_text(有效负载，种类=args.kind)build_push_text(有效负载，kind=args.kind)
+    if args.daily:
+        title, content = build_early_report_text(payload)
+    else:
+        title, content = build_push_text(payload, kind=args.kind)
 
-打印("="*60)print("="*60)
-标记(f"标准：{title}")
-打印(“-”*60)print("-"*60)
-符号（内容）print(content)
-打印("="*60)print("="*60)
+    print("=" * 60)
+    print(f"标题：{title}")
+    print("-" * 60)
+    print(content)
+    print("=" * 60)
 
-如果args.text_out：如果args.text_out：
-将(args.text_out，"w"，encoding="utf-8")作为f:with open(args.text_out，"w"，encoding="utf-8")as f：
-f。write(f"{title}\n\n{content}\n")write(f"{title}\n\n{content}\n")
-打印(f"[*]文案已写入{args.text_out}"，文件=sys.stderr)打印(f"[*]文案已写入{args.text_out}"，文件=sys.stderr)
+    if args.text_out:
+        with open(args.text_out, "w", encoding="utf-8") as f:
+            f.write(f"{title}\n\n{content}\n")
+        print(f"[*] 文案已写入 {args.text_out}", file=sys.stderr)
 
-如果args.dry_run：如果args.dry_run：
-打印(“[*]试运行：未发送"，file=sys.stderr)打印("[*]预演：未发送"，file=sys.stderr)
-返回0返回0
+    if args.dry_run:
+        print("[*] dry-run：未发送", file=sys.stderr)
+        return 0
 
-标记=os.environ.get(ENV_TOKEN，"").strip()环境.get(ENV_TOKEN，"")。带()
-如果不是令牌：如果不是令牌：
-#未配置令牌=未启用推送。**不是失败**：仓库是公开的，# 未配置 token = 未启用推送。**不是失败**：仓库是公开的，
-#fork之后没有秘密的人不应该看到一条红色工作流程。# fork 之后没有 secret 的人不应该看到一条红色 workflow。
-打印(f"[*]未设置{ENV_TOKEN}，跳过推送（视为未启用）"，file=sys.stderr)打印(f"[*]未设置{ENV_TOKEN}，跳过推送（视为未启用）"，file=sys.stderr)
-返回0返回0
+    token = os.environ.get(ENV_TOKEN, "").strip()
+    if not token:
+        # 未配置 token = 未启用推送。**不是失败**：仓库是公开的，
+        # fork 之后没有 secret 的人不应该看到一条红色 workflow。
+        print(f"[*] 未设置 {ENV_TOKEN}，跳过推送（视为未启用）", file=sys.stderr)
+        return 0
 
-OK，msg=send_pushplus(令牌、标题、内容)send_pushplus(令牌、标题、内容)
-如果合格：如果合格：
-print(f"[*]推送成功：{msg}"，file=sys.stderr)print(f"[*]推送成功：{msg}"，file=sys.stderr)
-返回0返回0
-打印(f"[！]推送失败：{msg}"，file=sys.stderr)打印(f"[！]推送失败：{msg}"，file=sys.stderr)
-#返回3让工作流程步骤标红，但该步骤是出错时继续，#返回3让工作流程步骤标红，但该步骤是出错时继续，
-#不会阻断后续发布(R16-4).#不会阻断后续发布(R16-4).
-返回3返回3
+    ok, msg = send_pushplus(token, title, content)
+    if ok:
+        print(f"[*] 推送成功：{msg}", file=sys.stderr)
+        return 0
+    print(f"[!] 推送失败：{msg}", file=sys.stderr)
+    # 返回 3 让 workflow 步骤标红，但该步骤是 continue-on-error，
+    # 不会阻断后续发布（R16-4）。
+    return 3
 
 
-如果__name__=="__main__"：__name__=="__main__"：
-    sys.exit(main())exit(main())
-
+if __name__ == "__main__":
+    sys.exit(main())
