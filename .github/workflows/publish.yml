@@ -1,0 +1,108 @@
+name: publish-dashboard
+
+# =============================================================================
+# R14：日更迁移到 GitHub Actions，零长期 PAT
+# =============================================================================
+# 【触发方式】只保留定时与手动 —— **刻意不写 on: push**。
+#   这是"防自我触发循环"的第一重保险：产物 push 到 gh-pages 时，即使
+#   某些配置下触发了 workflow，也会被这里没有 push 触发器直接挡掉。
+on:
+  schedule:
+    # cron 用 UTC。北京时间 08:00 = UTC 00:00。
+    # ⚠️ GitHub 的 schedule 是"尽力而为"：高峰期可能有 5-15 分钟延迟，
+    #    极端情况下甚至跳过某次。这是官方已知行为，不是配置错误。
+    - cron: '0 0 * * *'
+  workflow_dispatch:      # 手动触发：仓库 Actions 页 → 本 workflow → Run workflow
+
+# 第二重保险：只用内置 GITHUB_TOKEN，不需要、也不使用任何长期 PAT。
+# contents: write 是推送到 gh-pages 分支所必需的最小权限。
+permissions:
+  contents: write
+
+# 防止两次运行重叠：前一次还没跑完时，新的一轮排队而非并发。
+# cancel-in-progress: false —— 不打断进行中的发布（避免产生半截提交）。
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout 代码（main 分支）
+        uses: actions/checkout@v4
+        with:
+          # 只 checkout main，**不** checkout gh-pages。
+          # 产物分支由 publish_cloud.py 自己 fetch/创建，保持职责清晰。
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'          # 利用 GitHub 缓存加速依赖安装
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ---------------------------------------------------------------------
+      # Step A：体检（探测公网源）
+      # ---------------------------------------------------------------------
+      # continue-on-error: true —— 探测失败也要继续发布。
+      #   "全部源都挂了"本身就是一条**必须被发布的重要告警**，不能因为
+      #   探针返回非零就中止流程（那等于把最该报的警吞掉了）。
+      #   退出码仅用于让本步骤在 Actions 界面标红，便于人眼识别。
+      - name: 体检（探测公网源）
+        id: probe
+        continue-on-error: true
+        run: |
+          python tools/probe_v4.py \
+            --location cloud \
+            -o report.json \
+            --min-ok-list 1 \
+            --per-host 4 \
+            --timeout 8 \
+            --total-timeout 180
+
+      # 记录体检退出码，便于事后区分"体检挂"还是"发布挂"
+      - name: 记录体检结果
+        if: always()
+        run: |
+          echo "probe outcome = ${{ steps.probe.outcome }}"
+          python tools/summarize_probe.py report.json
+
+      # ---------------------------------------------------------------------
+      # Step B：发布（脱敏 + 推 gh-pages）
+      # ---------------------------------------------------------------------
+      # 凭据用内置 GITHUB_TOKEN（由上面的 permissions 注入）。
+      # R12b 脱敏闸门在这一步内部执行：命中直链特征串即抛异常中止推送。
+      - name: 发布到 gh-pages
+        run: |
+          python tools/publish_cloud.py \
+            --report report.json \
+            --repo "$RUNNER_TEMP/gh-pages-worktree" \
+            --remote "https://github.com/${{ github.repository }}.git" \
+            --branch gh-pages \
+            --dashboard-html index.html \
+            --push
+        env:
+          # 显式传入内置 token。publish_cloud.py 的凭据优先级是
+          # GITHUB_TOKEN > GITHUB_PAT，所以这里设 GITHUB_TOKEN 即可。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------------
+      # Step C：保留体检原始报告（便于排查）
+      # ---------------------------------------------------------------------
+      - name: 上传体检报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-report
+          path: report.json
+          retention-days: 7
+          if-no-files-found: warn
