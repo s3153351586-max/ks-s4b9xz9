@@ -110,8 +110,11 @@
   <div class="note">
     本页仅含<strong>公网源</strong>探测结论（可用性 / 延迟 / 码率），不含任何内网地址、
     账号或密钥。<br>
-    「云端免测」= 内网源在云端主动跳过（运营商封外省），属正常，非故障；
-    「已被抑制」= 本机网络异常导致的告警降级，非源结论。<br>
+    「云端免测」= 内网源在云端主动跳过（运营商封外省），属正常，非故障；<br>
+    「已被抑制」= 本机网络异常导致的告警降级，非源结论；<br>
+    「家里视角缺报」= 手机侧探针超过 24 小时未上报。这是<strong>灰色提示而非告警</strong>
+    ——它只说明家里情况未知，<strong>不影响云端结论的有效性</strong>，
+    也不会抑制任何公网告警。此时请开电视人工确认一次。<br>
     数据每 24 小时由云端自动更新一次。渲染失败时请查看 <code>cloud/latest.json</code>。
   </div>
 </div>
@@ -206,6 +209,11 @@
     var alarms = (status && status.alarms) || [];
     var suppressed = (status && status.suppressed) || [];
     var verdicts = (status && status.verdicts) || {};
+    // R16-3：家侧降级语义。local_freshness.stale = 家里探针超过 24h 没上报。
+    // 关键点：**它不抑制公网告警**（R15 语义保持）—— 云端结论独立成立。
+    // 它只增加一句"家里视角未知，请人工确认"，而不是把自己升级成告警。
+    var fresh = (status && status.local_freshness) || {};
+    var localStale = fresh.stale === true;
 
     var banner, msg, detail;
     if(ns === "lan_down" || ns === "wan_down"){
@@ -219,6 +227,12 @@
       banner = "bad";
       msg = "🔴 有 " + alarms.length + " 项需要处理";
       detail = "涉及：" + alarms.join("、") + "。详见下方明细。";
+    } else if(localStale){
+      // 灰/黄而非红：不确定 ≠ 故障。红色是留给"确知有问题"的。
+      banner = "warn";
+      msg = "⚪ 家里视角缺报（人工确认）";
+      detail = (fresh.note || "本地探针超过 24 小时未上报")
+             + "。云端视角正常；家里情况请开电视人工确认。";
     } else if(verdicts.intranet_alive && !verdicts.source_dead){
       banner = "ok";
       msg = "🟢 一切正常";
@@ -250,7 +264,8 @@
       (s.total_stream!=null?s.total_stream:"—") +
       "　|　列表 " + (s.ok_list!=null?s.ok_list:"—") + "/" +
       (s.total_list!=null?s.total_list:"—") +
-      (status ? "　|　家里视角 " + fmtTs(status.local_timestamp || status.published_at) : "");
+      (status ? "　|　家里视角 " + (localStale ? "缺报"
+                : fmtTs(status.local_timestamp || status.published_at)) : "");
 
     // ---- 四象限卡片：以最近一次数据统计落点 ----
     var q = {all_pass:0, local_block:0, geo_block:0, source_dead:0,
