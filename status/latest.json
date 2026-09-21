@@ -1,0 +1,30 @@
+{
+  "version": "v4.2",
+  "published_at": "2026-09-22T03:22:40.364193+08:00",
+  "cloud_timestamp": "2026-09-21T19:22:40.248724",
+  "cloud_ok_stream": 1,
+  "cloud_total_stream": 1,
+  "cloud_ok_list": 3,
+  "cloud_total_list": 5,
+  "verdicts": {},
+  "alarms": [],
+  "suppressed": [],
+  "network_state": "lan_down",
+  "intranet_status": null,
+  "local_freshness": {
+    "stale": true,
+    "last_seen": null,
+    "age_hours": null,
+    "note": "从未收到本地摘要：家里视角完全缺报"
+  },
+  "counters": {
+    "run_id": 1,
+    "probe_runs": 1,
+    "alarm_runs": 0,
+    "alarms_total": 0,
+    "suppressed_total": 0,
+    "pending_total": 0,
+    "first_run_at": "2026-09-22T03:22:40.364184+08:00"
+  },
+  "run_id": 1
+}

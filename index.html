@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="referrer" content="no-referrer">
+<title>IPTV 巡检看板</title>
+<style>
+  :root{
+    --bg:#0f1419; --card:#182027; --line:#2a343d; --fg:#e6edf3; --dim:#8b98a5;
+    --ok:#3fb950; --okbg:#12261a; --fail:#f85149; --failbg:#2a1618;
+    --skip:#6ea8d8; --skipbg:#141f2b; --warn:#d29922; --warnbg:#2a2312;
+    --accent:#58a6ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+       "Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
+  h1{font-size:20px;margin:0 0 4px}
+  h2{font-size:15px;margin:0 0 12px;color:var(--dim);font-weight:600;
+     letter-spacing:.02em;text-transform:uppercase}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:18px}
+  .banner{border-radius:10px;padding:16px 18px;margin-bottom:20px;
+          border:1px solid var(--line);display:flex;gap:14px;align-items:flex-start}
+  .banner .dot{font-size:26px;line-height:1;min-width:26px;text-align:center;
+               font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",
+               sans-serif}
+  /* 无 emoji 字体的环境（部分无头/精简系统）下用色块兜底，避免显示成方框 */
+  .banner .dot.noemoji{width:14px;height:14px;border-radius:50%;min-width:14px;
+                       margin-top:5px;display:inline-block;border:none}
+  .banner.ok{background:var(--okbg);border-color:#1f5130}
+  .banner.warn{background:var(--warnbg);border-color:#5c4a15}
+  .banner.bad{background:var(--failbg);border-color:#6e2b2b}
+  .banner h3{margin:0 0 4px;font-size:16px}
+  .banner p{margin:0;color:var(--dim);font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+        gap:12px;margin-bottom:22px}
+  .q{background:var(--card);border:1px solid var(--line);border-radius:10px;
+     padding:14px 16px;position:relative;overflow:hidden}
+  .q.hit{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  .q .tag{font-size:11px;color:var(--dim);letter-spacing:.04em}
+  .q .num{font-size:26px;font-weight:700;margin:6px 0 2px}
+  .q .desc{font-size:12px;color:var(--dim)}
+  .q .rmark{position:absolute;top:10px;right:12px;font-size:11px;
+            color:var(--accent);font-weight:600}
+  table{width:100%;border-collapse:collapse;background:var(--card);
+        border:1px solid var(--line);border-radius:10px;overflow:hidden;
+        font-size:13px;margin-bottom:22px}
+  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid var(--line)}
+  th{background:#1d262e;color:var(--dim);font-weight:600;font-size:12px;
+     white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  .pill{display:inline-block;padding:2px 8px;border-radius:9px;font-size:11px;
+        font-weight:600;white-space:nowrap}
+  .p-ok{background:var(--okbg);color:var(--ok);border:1px solid #235c36}
+  .p-fail{background:var(--failbg);color:var(--fail);border:1px solid #6e2b2b}
+  .p-skip{background:var(--skipbg);color:var(--skip);border:1px solid #2b435c}
+  .p-unk{background:#222b33;color:var(--dim);border:1px solid #38424c}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,
+        Menlo,Consolas,monospace}
+  .dim{color:var(--dim)}
+  .chart{background:var(--card);border:1px solid var(--line);border-radius:10px;
+         padding:14px 16px;margin-bottom:22px}
+  svg{width:100%;height:auto;display:block}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--dim);
+          margin-top:10px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;
+            margin-right:5px;vertical-align:-1px}
+  .hist{display:flex;flex-wrap:wrap;gap:8px}
+  .hist a{color:var(--accent);text-decoration:none;background:var(--card);
+          border:1px solid var(--line);border-radius:8px;padding:6px 11px;
+          font-size:12px;font-variant-numeric:tabular-nums}
+  .hist a:hover{border-color:var(--accent)}
+  .note{color:var(--dim);font-size:12px;margin-top:26px;padding-top:16px;
+        border-top:1px solid var(--line)}
+  .empty{color:var(--dim);text-align:center;padding:26px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>IPTV 巡检看板</h1>
+  <div class="sub" id="sub">加载中…</div>
+
+  <div id="banner" class="banner warn">
+    <div class="dot">⏳</div>
+    <div><h3>正在读取数据</h3><p>请稍候</p></div>
+  </div>
+
+  <h2>双位置鉴别矩阵</h2>
+  <div class="grid" id="matrix"></div>
+
+  <h2>目标明细（最近一次云端探测）</h2>
+  <div id="targets"></div>
+
+  <h2>近 7 日趋势</h2>
+  <div class="chart">
+    <div id="trend"></div>
+    <div class="legend">
+      <span><i style="background:var(--ok)"></i>可用流数</span>
+      <span><i style="background:var(--accent)"></i>可用列表数</span>
+      <span><i style="background:var(--warn)"></i>中位延迟 (ms)</span>
+    </div>
+  </div>
+
+  <h2>历史报告</h2>
+  <div class="hist" id="hist"></div>
+
+  <div class="note">
+    本页仅含<strong>公网源</strong>探测结论（可用性 / 延迟 / 码率），不含任何内网地址、
+    账号或密钥。<br>
+    「云端免测」= 内网源在云端主动跳过（运营商封外省），属正常，非故障；
+    「已被抑制」= 本机网络异常导致的告警降级，非源结论。<br>
+    数据每 24 小时由云端自动更新一次。渲染失败时请查看 <code>cloud/latest.json</code>。
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // 只依赖两个文件：cloud/latest.json（本次进度）、cloud/history/*.json（趋势）
+  // 手机回传的 status/latest.json 可选——有则显示家里视角，无则明确标注缺报。
+  var LATEST = "cloud/latest.json";
+  var STATUS = "status/latest.json";
+  var HISTORY_DAYS = 7;
+
+  // 时间戳统一用本地时区展示，避免云端 UTC 造成「今天/昨天」错乱
+  function parseTs(ts){
+    if(!ts) return null;
+    if(ts instanceof Date) return isNaN(ts.getTime()) ? null : ts;
+    var s = String(ts).trim();
+    // 兼容 "2026-09-21T09:30:00" / "20260921T09:30:00" / "2026-09-21 09:30:00"
+    s = s.replace(/^(\d{4})(\d{2})(\d{2})T/, "$1-$2-$3T");
+    s = s.replace(" ", "T");
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function fmtTs(ts){
+    var d = parseTs(ts);
+    if(!d) return ts ? String(ts) : "—";
+    function p(n){ return n<10 ? "0"+n : ""+n; }
+    return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+
+           p(d.getHours())+":"+p(d.getMinutes());
+  }
+  function esc(s){
+    return String(s==null?"":s).replace(/[&<>"']/g, function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function txt(url){
+    return fetch(url, {cache:"no-store"}).then(function(r){
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return r.json();
+    });
+  }
+  // 与 test 里的语义保持一致：skip 是主动跳过，unknown 是没数据
+  function stateOf(t){
+    if(!t) return "unknown";
+    if(t.error === "skip_cloud") return "skip";
+    return t.ok ? "ok" : "fail";
+  }
+  function pill(st){
+    var m = {ok:["p-ok","可用"], fail:["p-fail","失败"],
+             skip:["p-skip","云端免测"], unknown:["p-unk","未探测"]};
+    var x = m[st] || m.unknown;
+    return '<span class="pill '+x[0]+'">'+x[1]+'</span>';
+  }
+  // 象限：按 cloud x local 落在哪个格子，返回中文一句话
+  function quadrant(cs, ls){
+    if(cs==="ok"  && ls==="ok")    return {k:"all_pass",  t:"双端可达",       d:"云端与家里均能取到，正常"};
+    if(cs==="ok"  && ls==="fail")  return {k:"local_block",t:"本地通道被墙",  d:"云端通、家里不通：本地通道问题（需代理）"};
+    if(cs==="fail"&& ls==="ok")    return {k:"geo_block",  t:"境外封锁/内网可播",d:"云端不通、家里通：运营商封外省，非故障"};
+    if(cs==="fail"&& ls==="fail")  return {k:"source_dead",t:"疑似源真死",     d:"两端都不通，需切备用源"};
+    if(cs==="skip"&& ls==="ok")    return {k:"intranet_alive",t:"内网源存活",  d:"云端免测 + 家里可用：健康常态，不告警"};
+    if(cs==="skip"&& ls==="fail")  return {k:"intranet_dead",t:"内网源失效",   d:"云端免测 + 家里也不通：切备用线路"};
+    if(ls==="unknown")             return {k:"no_local",   t:"家里视角缺报",  d:"本地探针未上报，内网状态未知"};
+    return {k:"unknown", t:"数据不足", d:"该源缺少一侧数据"};
+  }
+
+  Promise.all([
+    txt(LATEST).catch(function(){ return null; }),
+    txt(STATUS).catch(function(){ return null; })
+  ]).then(function(res){
+    var cloud = res[0], status = res[1];
+    if(!cloud){ renderError(); return; }
+    render(cloud, status);
+  }).catch(renderError);
+
+  function renderError(){
+    document.getElementById("sub").textContent = "数据读取失败";
+    document.getElementById("banner").className = "banner bad";
+    document.getElementById("banner").innerHTML =
+      '<div class="dot">⚠️</div><div><h3>拿不到 cloud/latest.json</h3>'+
+      '<p>可能是首次部署尚未发布数据，或分支/路径不对。'+
+      '请确认 dashboard 分支下存在 <code>cloud/latest.json</code>。</p></div>';
+  }
+
+  function render(cloud, status){
+    var s = cloud.summary || {};
+    var targets = cloud.targets || [];
+    var loc = cloud.probe_location || "cloud";
+
+    // ---- 顶部横幅：一句话说人话 ----
+    var ns = (status && status.network_state) || "";
+    var alarms = (status && status.alarms) || [];
+    var suppressed = (status && status.suppressed) || [];
+    var verdicts = (status && status.verdicts) || {};
+
+    var banner, msg, detail;
+    if(ns === "lan_down" || ns === "wan_down"){
+      banner = "bad";
+      msg = "🔴 " + (ns==="lan_down" ? "家里网络断了（路由器/局域网）"
+                                     : "宽带断了（运营商线路）");
+      detail = "故障在本机网络，源侧结论本次已抑制"
+             + (suppressed.length ? "（" + suppressed.length + " 项待复核）" : "")
+             + "。先查网络，源大概率没问题。";
+    } else if(alarms.length){
+      banner = "bad";
+      msg = "🔴 有 " + alarms.length + " 项需要处理";
+      detail = "涉及：" + alarms.join("、") + "。详见下方明细。";
+    } else if(verdicts.intranet_alive && !verdicts.source_dead){
+      banner = "ok";
+      msg = "🟢 一切正常";
+      detail = "内网源可用，公网源正常，无需操作。";
+    } else {
+      banner = "ok";
+      msg = "🟢 巡检正常";
+      detail = "未发现需要处理的项。";
+    }
+
+    document.getElementById("banner").className = "banner " + banner;
+    // emoji 是代理对，不能用 slice(0,2) 切；且部分环境无 emoji 字体，
+    // 此时退化为纯色圆点（CSS .noemoji），保证语义不丢。
+    var m = msg.match(/^(\p{Extended_Pictographic}\uFE0F?)\s*/u);
+    var icon = m ? m[1] : (banner === "ok" ? "🟢" : "🔴");
+    var rest = m ? msg.slice(m[0].length) : msg;
+    var noEmoji = !/\p{Extended_Pictographic}/u.test(icon);
+    var dotCls = "dot" + (noEmoji ? " noemoji" : "");
+    var dotStyle = noEmoji
+      ? "background:" + (banner === "ok" ? "var(--ok)" : "var(--fail)") + ";"
+      : "";
+    document.getElementById("banner").innerHTML =
+      '<div class="'+dotCls+'" style="'+dotStyle+'">'+icon+'</div>'+
+      '<div><h3>'+esc(rest)+'</h3><p>'+esc(detail)+'</p></div>';
+
+    document.getElementById("sub").textContent =
+      "云端探测 " + fmtTs(cloud.timestamp) +
+      "　|　公网流 " + (s.ok_stream!=null?s.ok_stream:"—") + "/" +
+      (s.total_stream!=null?s.total_stream:"—") +
+      "　|　列表 " + (s.ok_list!=null?s.ok_list:"—") + "/" +
+      (s.total_list!=null?s.total_list:"—") +
+      (status ? "　|　家里视角 " + fmtTs(status.local_timestamp || status.published_at) : "");
+
+    // ---- 四象限卡片：以最近一次数据统计落点 ----
+    var q = {all_pass:0, local_block:0, geo_block:0, source_dead:0,
+             intranet_alive:0, intranet_dead:0, no_local:0, unknown:0};
+    targets.forEach(function(t){
+      var k = quadrant(stateOf(t), "unknown").k;
+      if(stateOf(t) === "skip") k = "intranet_alive";   // 云端 skip 一律按内网源归类
+      q[k] = (q[k]||0) + 1;
+    });
+    // 有 status 时，用云端摘要的 verdicts 覆盖（更准，含家里侧）
+    Object.keys(verdicts).forEach(function(k){
+      if(k in q) q[k] = Math.max(q[k], verdicts[k]);
+    });
+
+    var cards = [
+      ["all_pass","双端可达","云端✓ 家里✓"],
+      ["geo_block","境外封锁 / 内网可播","云端✗ 家里✓（正常）"],
+      ["intranet_alive","内网源存活","云端免测 家里✓"],
+      ["local_block","本地通道被墙","云端✓ 家里✗"],
+      ["source_dead","疑似源真死","云端✗ 家里✗"],
+      ["intranet_dead","内网源失效","云端免测 家里✗"]
+    ];
+    var host = document.getElementById("matrix");
+    host.innerHTML = cards.map(function(c){
+      var n = q[c[0]] || 0;
+      var hit = n > 0 && c[0] !== "all_pass" ? " hit" : "";
+      var color = (c[0]==="source_dead"||c[0]==="intranet_dead") ? "var(--fail)"
+                : (c[0]==="local_block") ? "var(--warn)"
+                : (c[0]==="geo_block") ? "var(--accent)" : "var(--ok)";
+      return '<div class="q'+hit+'">'+
+        (n>0?'<div class="rmark">本次命中</div>':'')+
+        '<div class="tag">'+esc(c[1])+'</div>'+
+        '<div class="num" style="color:'+color+'">'+n+'</div>'+
+        '<div class="desc">'+esc(c[2])+'</div></div>';
+    }).join("");
+
+    // ---- 目标明细表 ----
+    var rows = targets.map(function(t){
+      var st = stateOf(t);
+      var lat = t.ttfb_ms!=null ? t.ttfb_ms+" ms"
+              : (t.latency_ms!=null ? t.latency_ms+" ms" : "—");
+      var spd = t.speed_kbps!=null ? t.speed_kbps+" kbps" : "—";
+      var ch  = t.channel_count!=null ? t.channel_count : "—";
+      var detail = t.kind === "list" ? ("频道 "+ch)
+                 : (t.kind === "head" ? "网络层探针" : (t.container || "—"));
+      return "<tr><td class='mono'>"+esc(t.id)+"</td>"+
+             "<td>"+esc(t.name||"")+"</td>"+
+             "<td class='dim'>"+esc(t.scope||"")+"</td>"+
+             "<td class='dim'>"+esc(t.kind||"")+"</td>"+
+             "<td>"+pill(st)+"</td>"+
+             "<td class='mono'>"+esc(lat)+"</td>"+
+             "<td class='mono'>"+esc(spd)+"</td>"+
+             "<td class='dim'>"+esc(detail)+"</td>"+
+             "<td class='dim'>"+esc(t.error||"")+"</td></tr>";
+    }).join("");
+    document.getElementById("targets").innerHTML = rows
+      ? "<table><thead><tr><th>ID</th><th>名称</th><th>域</th><th>类型</th>"+
+        "<th>状态</th><th>延迟</th><th>速度</th><th>明细</th><th>错误</th></tr></thead>"+
+        "<tbody>"+rows+"</tbody></table>"
+      : '<div class="empty">无目标数据</div>';
+
+    // ---- 历史与趋势 ----
+    loadTrend(cloud);
+  }
+
+  function loadTrend(cloud){
+    // 用最新报告日期向前推 7 天，逐个尝试加载 history/YYYYMMDD.json（404 直接跳过）
+    // 注意：必须用 parseTs 解析，云端时间戳可能是 "20260921T09:30:00" 无分隔符形式，
+    // 直接 new Date() 在部分引擎返回 Invalid Date，会推出空日期列表 → 趋势全 404。
+    var base = parseTs(cloud.timestamp) || new Date();
+    var dates = [];
+    for(var i=HISTORY_DAYS-1; i>=0; i--){
+      var d = new Date(base.getTime() - i*86400000);
+      var y=d.getFullYear(), m=("0"+(d.getMonth()+1)).slice(-2), dd=("0"+d.getDate()).slice(-2);
+      dates.push(""+y+m+dd);
+    }
+    Promise.all(dates.map(function(k){
+      return txt("cloud/history/"+k+".json")
+        .then(function(j){ return {date:k, json:j}; })
+        .catch(function(){ return null; });
+    })).then(function(list){
+      var got = list.filter(Boolean);
+      renderHist(got);
+      drawTrend(got);
+    });
+  }
+
+  function renderHist(got){
+    var host = document.getElementById("hist");
+    if(!got.length){ host.innerHTML = '<div class="empty">暂无历史归档</div>'; return; }
+    host.innerHTML = got.slice().reverse().map(function(g){
+      var d = g.date, y=d.slice(0,4), m=d.slice(4,6), dd=d.slice(6,8);
+      return '<a href="cloud/history/'+d+'.json" target="_blank" rel="noopener">'+
+             y+"-"+m+"-"+dd+'</a>';
+    }).join("");
+  }
+
+  function drawTrend(got){
+    var host = document.getElementById("trend");
+    if(got.length < 2){
+      host.innerHTML = '<div class="empty">趋势需要至少 2 天归档数据（当前 '+got.length+' 天）</div>';
+      return;
+    }
+    var W=920, H=240, PL=48, PR=14, PT=14, PB=28;
+    var iw = W-PL-PR, ih = H-PT-PB;
+
+    function v(g, key){ return (g.json.summary||{})[key]; }
+    function spd(g){
+      // 中位延迟仅用 stream 类型的 ttfb
+      var a = (g.json.targets||[]).filter(function(t){
+        return t.kind==="stream" && t.ttfb_ms!=null;
+      }).map(function(t){ return t.ttfb_ms; }).sort(function(x,y){return x-y;});
+      if(!a.length) return null;
+      return a[Math.floor(a.length/2)];
+    }
+
+    var serial = [
+      {key:"ok_stream", color:"var(--ok)"},
+      {key:"ok_list",   color:"var(--accent)"}
+    ];
+    var sMax = 1, lMax = 1;
+    got.forEach(function(g){
+      serial.forEach(function(s){ sMax = Math.max(sMax, v(g,s.key)||0); });
+      var m = spd(g); if(m!=null) lMax = Math.max(lMax, m);
+    });
+
+    function X(i){ return PL + (got.length===1?iw/2:(iw*i/(got.length-1))); }
+    function Y(vv,mx){ return PT + ih - (ih * (vv||0) / (mx||1)); }
+
+    var g = [];
+    // 网格 + 左 Y 轴（计数）。右 Y 轴（延迟）只在顶/底各标一个值——
+    // 两侧都打 5 档会让「2/2、1/1」这种同值不同义的标签并排出现，肉眼必误读。
+    for(var t=0;t<=4;t++){
+      var y = PT + ih*t/4;
+      g.push('<line x1="'+PL+'" y1="'+y+'" x2="'+(W-PR)+'" y2="'+y+
+             '" stroke="var(--line)" stroke-width="1"/>');
+      var lv = Math.round(sMax*(1-t/4));
+      g.push('<text x="'+(PL-8)+'" y="'+(y+4)+'" fill="var(--dim)" font-size="11" '+
+             'text-anchor="end">'+lv+'</text>');
+    }
+    g.push('<text x="'+(W-PR+8)+'" y="'+(PT+4)+'" fill="var(--warn)" '+
+           'font-size="11" text-anchor="start" opacity=".85">'+Math.round(lMax)+'ms</text>');
+    g.push('<text x="'+(W-PR+8)+'" y="'+(PT+ih+4)+'" fill="var(--warn)" '+
+           'font-size="11" text-anchor="start" opacity=".85">0ms</text>');
+    // X 轴日期
+    got.forEach(function(gg,i){
+      var d = gg.date;
+      g.push('<text x="'+X(i)+'" y="'+(H-8)+'" fill="var(--dim)" font-size="11" '+
+             'text-anchor="middle">'+d.slice(4,6)+"/"+d.slice(6,8)+'</text>');
+    });
+    // 折线
+    serial.forEach(function(s){
+      var pts = got.map(function(gg,i){ return X(i)+","+Y(v(gg,s.key), sMax); });
+      g.push('<polyline points="'+pts.join(" ")+'" fill="none" stroke="'+s.color+
+             '" stroke-width="2" stroke-linejoin="round"/>');
+      got.forEach(function(gg,i){
+        g.push('<circle cx="'+X(i)+'" cy="'+Y(v(gg,s.key),sMax)+'" r="3" fill="'+s.color+'"/>');
+      });
+    });
+    // 延迟折线（虚线，右轴刻度）
+    var lpts = [];
+    got.forEach(function(gg,i){
+      var m = spd(gg); if(m==null) return;
+      lpts.push((lpts.length?"":"")+X(i)+","+Y(m,lMax));
+    });
+    if(lpts.length > 1){
+      g.push('<polyline points="'+lpts.join(" ")+'" fill="none" stroke="var(--warn)" '+
+             'stroke-width="2" stroke-dasharray="5 4"/>');
+    }
+
+    host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="xMidYMid meet" '+
+                     'role="img" aria-label="近 7 日可用性与延迟趋势">'+g.join("")+'</svg>';
+  }
+})();
+</script>
+</body>
+</html>
