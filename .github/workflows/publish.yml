@@ -237,7 +237,7 @@ jobs:
         if: >-
           false &&
           always() &&
-          secrets.PUSH_TOKEN != '' &&
+          false &&
           (vars.IPTV_DAILY_REPORT == '1' ||
            hashFiles('spool/notify_pending.json') != '')
         run: |
