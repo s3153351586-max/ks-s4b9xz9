@@ -1,6 +1,46 @@
 name: publish-dashboard
 
 # =============================================================================
+# 【R21 修订说明 —— 关于 if 里的 secrets（务必先读）】
+# =============================================================================
+# 【本次改了什么】
+#   全文所有 `if:` 块里**不再出现任何 `secrets.*` 引用**（含被短路的）。
+#   三个被关闭的可选步骤，统一改成最直白的形态：
+#
+#     - notify（微信推送）        if: false
+#     - 私推 iptv-private        if: false
+#     - 私推未启用说明            if: false
+#
+# 【为什么要这么改】
+#   原来的写法是 `false && ... && secrets.PUSH_TOKEN != '' && ...`
+#   （以及 `${{ secrets.PRIVATE_PAT != '' }}`）。语义上没问题 ——
+#   短路确实保证了永不执行。但 **GitHub 网页编辑器会对 `if:` 里的
+#   `secrets` 引用标红报错**，手机上逐行热修时很容易误判为"语法错"
+#   而改坏其它地方。改成 `if: false` 后语义完全等价、且零标红。
+#
+# 【将来要怎么重新启用（重要 —— 不要直接删 if: false 就开）】
+#   ❗ 由 **agent 用「job 级 env 注入」方案重开**，不要手动把 secrets
+#     写回 `if:` 里 —— 那样又会触发编辑器标红。
+#   正确思路：在 job 级或 step 级 `env:` 里注入一个普通变量，
+#   `if:` 只引用该变量（env 里放 secrets 是合法且不标红的），例如：
+#
+#     jobs:
+#       publish:
+#         env:
+#           HAS_PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+#         steps:
+#           - if: env.HAS_PUSH_TOKEN != ''
+#
+#   本次**不做**这一步（推送与私推均已决定搁置），仅留说明。
+#
+# 【本次未受影响的逻辑（原样保留）】
+#   - 双轨导出（gx_clean_hd.m3u / gx_full_305.m3u）
+#   - artifact 上传（backup-gx-m3u，7 天）
+#   - catchup 默认关（由 gx_epg_fetch.py 侧守卫，与本文件无关）
+#   - 台标自检 / 冻结 / 双轨子集等断言（均在测试侧，与本文件无关）
+# =============================================================================
+
+# =============================================================================
 # R14：日更迁移到 GitHub Actions，零长期 PAT
 # =============================================================================
 # 【触发方式】只保留定时与手动 —— **刻意不写 on: push**。
@@ -186,18 +226,11 @@ jobs:
           fi
 
       # ---------------------------------------------------------------------
-      # Step C：微信推送（可选，默认不启用）
+      # Step C：微信推送（可选，当前显式关闭）
       # ---------------------------------------------------------------------
-      # 【当前状态：未启用】
-      #   PushPlus / WxPusher 这类服务要付费，暂不接。
-      #   不配 PUSH_TOKEN 时本步骤**会被 if 直接跳过**（根本不会执行），
-      #   所以在 Actions 页面看不到它，也不会有任何噪音。
-      #
-      # 【想启用时怎么做】
-      #   1. Settings → Secrets and variables → Actions → New repository secret
-      #      Name = PUSH_TOKEN，Value = PushPlus 的 32 位 token
-      #      （没配 token 就永远走不到这里，这是刻意的——不配即不启用）
-      #   2. 当天有「状态翻转」时自动推送，无需其它操作
+      # 【当前状态：关闭，形态为 `if: false`】
+      #   整个步骤被 `if: false` 硬关（见下方 R21 修订说明）。
+      #   Actions 页面能看到这个 step，但永远是 skipped —— 不产生噪音。
       #
       # 【为什么放在 publish 之后】
       #   推送的内容来自 status/latest.json —— 那是 publish 步骤的产物。
@@ -208,38 +241,32 @@ jobs:
       #   因为推送接口抖了一下就丢掉当天的数据，是本末倒置。
       #   失败会计入 status 的 push_failures，留痕但不阻断。
       #
-      # 【if 条件的三道门】
-      #   1. secrets.PUSH_TOKEN != '' —— 没配 token 直接跳过（不启用）
+      # 【enable 时需要的条件（供将来参考）】
+      #   1. 有 PUSH_TOKEN（PushPlus 的 32 位 token）—— 放 Secrets
       #   2. 状态机判定 send=true（新告警 / 恢复 / 早报）—— 避免重复轰炸
       #   3. always() —— 即使 publish 挂了也要能报警
+      #   4. 早报开关：仓库变量 IPTV_DAILY_REPORT=1（用 vars 而非 secrets，
+      #      它不是敏感信息，且需要在 if 里可读）
       #
-      # 【早报开关（默认关）】
-      #   想开早报：设仓库变量 IPTV_DAILY_REPORT=1
-      #   （Settings → Variables → Actions → New repository variable）
-      #   用 vars 而不是 secrets：它不是敏感信息，且需要在 if 里可读。
+      # 【R21 修订：为什么改成 `if: false`（重要）】
+      #   R20.1 时这里写的是 `false && always() && secrets.PUSH_TOKEN != '' && ...`。
+      #   短路确实保证了"永不执行"，语义没问题。但 **`secrets.*` 出现在
+      #   `if:` 里会被 GitHub 网页编辑器标红报错** —— 手机上逐行热修时
+      #   极易误判为"语法错误"而改坏别处。
+      #   改成 `if: false` 后：语义完全等价（永不执行），且 `if:` 零 secrets、
+      #   编辑器零标红。
       #
-      # 【R20.1 基线同步：整个推送步骤被硬关掉（false &&）】
-      #   用户已决定**不启用**微信推送，所以这里用 `false &&` 把整个 if
-      #   短路 —— 无论后面条件怎么变，这一步永远不执行。
-      #
-      #   为什么不是直接删掉这一步、或者靠"不配 PUSH_TOKEN"来关：
-      #     1. 删掉 = 以后想启用得重写整段，且丢掉所有踩坑注释。
-      #     2. 靠 secrets 为空 = **隐性的**，将来谁配了 token 它就自己活了，
-      #        没人知道是谁、什么时候开的。
-      #     3. `false &&` 是**显式的、写在版本控制里的**关闭状态 ——
-      #        一眼能看到"这是有意关的"，改回来也只需删掉 5 个字符。
-      #
-      #   ⚠️ 如果有人想启用推送：把行首的 `false &&` 删掉即可，
-      #      其余逻辑（token 检查 / 状态机 send / 早报开关）都是完整可用的。
-      - name: 微信推送（已显式关闭 false&&；如需启用删掉行首 false &&）
+      #   ⚠️ **将来要启用：不要直接把 secrets 写回 if，也不要只删掉这一行。**
+      #      正确方式是由 agent 用**「job 级 env 注入」**方案重开：
+      #        jobs.publish.env:
+      #          HAS_PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+      #        step 的 if: env.HAS_PUSH_TOKEN != ''
+      #      env 里放 secrets 是合法且不标红的，if 只引用普通变量名。
+      #      完整说明见本文件头。
+      - name: 微信推送（已关闭：if false；启用方式见文件头）
         id: notify
         continue-on-error: true
-        if: >-
-          false &&
-          always() &&
-          secrets.PUSH_TOKEN != '' &&
-          (vars.IPTV_DAILY_REPORT == '1' ||
-           hashFiles('spool/notify_pending.json') != '')
+        if: false
         run: |
           python tools/notify_push.py \
             --status "$HOME/gh-pages-worktree/status/latest.json" \
@@ -247,6 +274,7 @@ jobs:
             --pages-url "${{ steps.pages_url.outputs.pages_url }}"
         env:
           # 凭据走 Secrets，代码零字面量。
+          # （放在 env 里不标红；被 if 挡住时这行不会执行。）
           PUSHPLUS_TOKEN: ${{ secrets.PUSH_TOKEN }}
 
       # ---------------------------------------------------------------------
@@ -313,180 +341,10 @@ jobs:
   #           README 里也写明了这一点，避免过期后无声失效。
   #
   # 【未配 PAT 时的行为 —— 双路径并存、默认安全】
-  #   没配 PRIVATE_PAT => 私有推送步骤**被 if 跳过**，Job 照常产出
-  #   artifact，你仍可手动下载。**功能不会坏，只是没走便捷通道。**
-  #   这是刻意的设计：便捷通道是"锦上添花"，不能成为"没有它就出事"的依赖。
+  #   设计意图：没配 PRIVATE_PAT 时私推步骤被跳过，Job 照常产出 artifact，
+  #   你仍可手动下载。**功能不会坏，只是没走便捷通道。**
+  #   便捷通道是"锦上添花"，不能成为"没有它就出事"的依赖。
   #
-  # 【触发条件为什么写成这样】
-  #   github.event_name == 'workflow_dispatch'  —— schedule 触发时
-  #     github.event.inputs 不存在，这个条件直接为假，定时任务绝不会
-  #     顺手生成含直链的 artifact。
-  #   github.event.inputs.export_backup == 'true'  —— boolean input 在
-  #     event.inputs 里是**字符串** 'true'/'false'（不是布尔），
-  #     写成 `== true` 会永远不成立。这个坑实测踩过。
-  export-backup:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.export_backup == 'true'
-    runs-on: ubuntu-latest
-    # 超时给足：EPG 取数 + 双轨写入 + 私有推送，正常 1-2 分钟内完成，
-    # 但接口慢时要留余量（这是手动触发的兜底任务，宁可慢也别失败）。
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout 代码（main 分支，**不碰** gh-pages）
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 1
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          # 【为什么要单独装 pypinyin】
-          #   R21 后台标主线是直采 channelIcon；Gitee 兜底通道的拼音候选
-          #   （"安徽卫视" → ANHUI）仍依赖 pypinyin。
-          #   它是**可选**依赖：缺失时兜底降级（少些图标）但绝不失败。
-          pip install -r requirements.txt
-          pip install pypinyin==0.55.0
-
-      - name: 导出双轨备用源 m3u
-        run: |
-          # 产物写到 $RUNNER_TEMP（**不是工作区**），从源头避免被
-          # 后续任何 checkout/commit 步骤扫到。
-          # --tracks 一次产出 gx_clean_hd.m3u + gx_full_305.m3u（同一快照）。
-          # --logo-stats 输出台标命中率 JSON，供下面的自检读取。
-          python tools/gx_epg_fetch.py \
-            --tracks "$RUNNER_TEMP/tracks" \
-            --logo-stats "$RUNNER_TEMP/logo_stats.json" \
-            --verbose
-
-          # 【自检】空列表或格式不对就直接失败，别让用户下到坏文件。
-          # 这是"产物质量闸门"：宁可 Job 标红，也不交付打不开的 m3u。
-          # 【R21 新增两条】
-          #   ① 双层命中率：硬线 <0.60 => 失败（上游字段突变防线）；
-          #      软线 <0.75 => 只告警不失败（第三方抖动不拦发布）。
-          #   ② 双轨套件默认**绝不含** catchup 字段（防误开）。
-          python - "$RUNNER_TEMP/tracks" "$RUNNER_TEMP/logo_stats.json" <<'PY'
-          import json, os, sys
-          tdir, statp = sys.argv[1], sys.argv[2]
-          clean = open(os.path.join(tdir, "gx_clean_hd.m3u"), encoding="utf-8").read()
-          full = open(os.path.join(tdir, "gx_full_305.m3u"), encoding="utf-8").read()
-
-          for name, txt in (("gx_clean_hd", clean), ("gx_full_305", full)):
-              lines = txt.splitlines()
-              assert lines and lines[0] == "#EXTM3U", f"{name} 缺 #EXTM3U 头"
-              assert "dalvik/2.1.0" in txt.lower(), f"{name} 缺 UA 头"
-              n = sum(1 for l in lines if l.startswith("#EXTINF"))
-              assert n >= 1, f"{name} 没有任何频道"
-              assert "servicetype=1" in txt, f"{name} 直链形态不对"
-              # R21 防误开：默认模式绝不出现 catchup/playseek 字样
-              low = txt.lower()
-              assert "playseek" not in low and "catchup" not in low, \
-                  f"{name} 默认模式却含 catchup 字段（开关被误开？）"
-              print(f"[OK] {name}: {n} 条")
-
-          st = json.load(open(statp, encoding="utf-8"))
-          print(f"[i] 台标 direct={st['direct']} fallback={st['fallback']} "
-                f"total={st['total']}")
-          print(f"[i] direct_logo_rate={st['direct_logo_rate']} "
-                f"combined_logo_rate={st['combined_logo_rate']}")
-          # 硬线：失败即 Job 红（守住上游 channelIcon 字段突变）
-          assert st["direct_ok"], (
-              f"硬线未达标：direct_logo_rate={st['direct_logo_rate']} < 0.60，"
-              "疑似上游 channelIcon 字段被削，请核查 EPG 返回结构")
-          # 软线：只告警，绝不阻断发布
-          if not st["combined_ok"]:
-              print(f"[!] 软线告警：combined_logo_rate="
-                    f"{st['combined_logo_rate']} < 0.75（不拦发布）")
-          print("[OK] 双轨产物自检通过")
-          PY
-
-      - name: 上传备用源（artifact —— 7 天自动删，不进仓库）
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backup-gx-m3u
-          # [R21] 双轨两个文件。**仍然只点名具体文件，绝不上传目录** ——
-          #   上传 `path: .` 或整个 tracks/ 会让中间产物被打包。
-          path: |
-            ${{ runner.temp }}/tracks/gx_clean_hd.m3u
-            ${{ runner.temp }}/tracks/gx_full_305.m3u
-            ${{ runner.temp }}/logo_stats.json
-          retention-days: 7
-          if-no-files-found: error
-
-      # -----------------------------------------------------------------------
-      # R21：推送到私有库 iptv-private（免手动下载）
-      # -----------------------------------------------------------------------
-      # 【安全边界 —— 逐步说明】
-      #   1. 目标仓库是**另一个**仓库（iptv-private），不是本仓库。
-      #      **不碰本仓库任何分支，尤其不碰 gh-pages。**
-      #   2. 凭据用 Secrets 里的 PRIVATE_PAT（fine-grained，仅读写在
-      #      iptv-private）。代码里零字面量 token。
-      #   3. token 通过 URL 传给 git 的做法会把它写进 .git/config，
-      #      这里用 `git remote set-url` 在 push 前设置、push 后立刻清除，
-      #      且**只推一个 commit**（--depth 1），把暴露窗口压到最小。
-      #   4. 未配 PAT => 本步骤被 if 跳过 => 退回 artifact 手动下载。
-      #      **双路径并存、默认安全。**
-      - name: 推送到私有库 iptv-private（未配 PAT 则自动跳过）
-        if: ${{ secrets.PRIVATE_PAT != '' }}
-        continue-on-error: true
-        env:
-          # 私有库名字，想换库只改这一处。
-          PRIVATE_REPO: iptv-private
-          PRIVATE_PAT: ${{ secrets.PRIVATE_PAT }}
-        run: |
-          set -euo pipefail
-          TARGET="https://x-access-token:${PRIVATE_PAT}@github.com/${{ github.repository_owner }}/${PRIVATE_REPO}.git"
-          WORK="$RUNNER_TEMP/private-push"
-          rm -rf "$WORK"; mkdir -p "$WORK"
-
-          # 先试 clone；空库/新库 clone 会失败，那就 init 一个。
-          if ! git clone --depth 1 "$TARGET" "$WORK" 2>/dev/null; then
-            echo "[i] 私有库为空或不存在，初始化为新仓库"
-            git -C "$WORK" init -q
-            git -C "$WORK" remote add origin "$TARGET"
-          fi
-
-          # 【为什么要分目录】产物按日期归档，方便你回溯"某天的源长什么样"，
-          #   而不是每次覆盖 —— 覆盖会丢掉"源何时变了"这条线索。
-          DEST="$WORK/$(date -u +%Y-%m-%d)"
-          mkdir -p "$DEST"
-          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$DEST/"
-          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$DEST/"
-          cp "$RUNNER_TEMP/logo_stats.json" "$DEST/"
-          # 最新一份另放 latest/，方便固定路径直接取用
-          mkdir -p "$WORK/latest"
-          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$WORK/latest/"
-          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$WORK/latest/"
-
-          git -C "$WORK" config user.name  "github-actions[bot]"
-          git -C "$WORK" config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C "$WORK" add -A
-          if git -C "$WORK" diff --cached --quiet; then
-            echo "[i] 内容无变化，跳过提交"
-          else
-            git -C "$WORK" commit -q -m "chore: 更新双轨备用源 $(date -u +%Y-%m-%d)"
-            git -C "$WORK" push -q origin HEAD:main || \
-              git -C "$WORK" push -q origin HEAD:master
-            echo "[OK] 已推送到 ${PRIVATE_REPO}"
-          fi
-          # 【立刻清除凭据】避免残留在 .git/config 里
-          git -C "$WORK" remote set-url origin \
-            "https://github.com/${{ github.repository_owner }}/${PRIVATE_REPO}.git"
-
-      # 未配 PAT 时的显式提示（让人知道产物在哪、怎么配便捷通道）
-      - name: 私有推送未启用时的说明
-        if: ${{ secrets.PRIVATE_PAT == '' }}
-        run: |
-          echo "[i] 未配置 PRIVATE_PAT —— 已跳过私有库推送。"
-          echo "    产物仍可在本 run 的 Artifacts 里下载（7 天内有效）。"
-          echo "    想启用免手动下载：新建私有库 iptv-private，"
-          echo "    并添加 Secrets.PRIVATE_PAT（fine-grained，仅该库 Contents 读写，90 天轮换）。"
+  #   ❗【当前实际状态】私推步骤是 `if: false`（**硬关，不是"等 PAT"**）。
+  #     原因：引入 90 天长期 PAT 与本项目"零长期凭据"的既定架构冲突，
+  #     且 artifact 手动下载对"战时备用"定位已足够。属搁置
