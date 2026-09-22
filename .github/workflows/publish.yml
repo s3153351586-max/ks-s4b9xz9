@@ -314,6 +314,20 @@ jobs:
   #      （R21 新增的私有库推送指向**另一个仓库** iptv-private，
   #        见下方说明 —— 它不碰本库任何分支，尤其不碰 gh-pages。）
   #
+  # 【R21.2：本 Job 内"产物目录"只有一个来源变量 OUT】
+  #   run 脚本首行 `OUT="$RUNNER_TEMP"`，之后**四处**全部由它派生：
+  #     ① python --tracks "$OUT"
+  #     ② python --logo-stats "$OUT/logo_stats.json"
+  #     ③ 自检 heredoc 读的三条路径（由 shell 展开后作为 argv 传入）
+  #     ④ upload-artifact 的 path（用 ${{ runner.temp }} 表达式语法引用
+  #        同一个目录 —— with: 读不到 shell 变量，这是同一目录的另一种写法）
+  #     ⑤ 私有推送的 4 处 cp 源（同样 OUT 派生）
+  #   外加一条 **"产物不得落工作区"的 find 断言**，把 R20 边界从
+  #   "靠人记得"升级为"结构性检查"。
+  #   【为什么必须这样】run#29/run#32 两次翻车都不是"某处写错"，而是
+  #   同一个目录被写成多个互不知情的字面量 —— 修一边、错一边。
+  #   变量统一后，改目录只需改一行。
+  #
   # 【为什么必须隔离到这种程度】
   #   产物 **含内网直链**（cdnrrs.gx.chinamobile.com/...）。
   #   它一旦进 gh-pages（公开 Pages），就等于把用户家的网络拓扑图挂在网上。
@@ -391,32 +405,62 @@ jobs:
 
       - name: 导出双轨备用源 m3u
         run: |
-          # 产物写到 $RUNNER_TEMP（**不是工作区**），从源头避免被
-          # 后续任何 checkout/commit 步骤扫到。
-          # 【R21.1 路径修正】--tracks 传 $RUNNER_TEMP 本身（不带子目录）。
-          #   gx_epg_fetch.py 的 --tracks 语义是"输出目录"，产物落在
-          #   $RUNNER_TEMP/gx_clean_hd.m3u 与 $RUNNER_TEMP/gx_full_305.m3u。
-          #   run#32 死因：之前把一个子目录当参数传入，导致 python 输出
-          #   与下面自检的读取路径错配（run 里 python 成功、自检却找不到文件）。
-          #   现在**全程同一目录 $RUNNER_TEMP**，无子目录，零歧义。
+          # ---------------------------------------------------------------
+          # 【R21.2 路径统一 —— 消灭"字面量分叉"这一类 bug】
+          # ---------------------------------------------------------------
+          # run#29 / run#32 连着两次翻车，根因**不是**某处路径写错，而是
+          # "同一个输出目录"被写成了**四个各自独立的字面量**：
+          #     ① python --tracks 的实参
+          #     ② 自检 python 里 open() 的拼接
+          #     ③ upload-artifact 的 path
+          #     ④ 私有推送的 cp 源
+          # 它们互相不知道对方。每轮只修被点名的那一边，就必然留下
+          # 另一边错配 —— 修一处、错一处，来回打转。
+          #
+          # 解法：**只留一个变量 OUT**，四处全部由它派生。
+          # 改目录时只改这一行，四条路径同时跟着变，结构上不可能再分叉。
+          # ---------------------------------------------------------------
+          OUT="$RUNNER_TEMP"
+          mkdir -p "$OUT"
+
+          # 【产物绝不落工作区】OUT 指向 $RUNNER_TEMP（runner 的临时目录，
+          #   运行结束随机器销毁），**不是** $GITHUB_WORKSPACE。
+          #   R20 边界：工作区里出现含内网直链的文件，就有被后续任何一步
+          #   （checkout/commit/artifact 通配）顺手带出去的风险。
+          #   放 $RUNNER_TEMP 是**结构性**隔离，不依赖谁记得加 .gitignore。
+          #
+          # 【--tracks 的语义已修正为"目录"】
+          #   它此前是 os.path.dirname(实参) —— 把参数当"文件前缀"取父目录。
+          #   于是传相对目录名会得到空串、产物掉进工作区。现已改为直接当目录
+          #   （见 gx_epg_fetch.py 的 out_dir 一行）。
           # --tracks 一次产出 gx_clean_hd.m3u + gx_full_305.m3u（同一快照）。
           # --logo-stats 输出台标命中率 JSON，供下面的自检读取。
           python tools/gx_epg_fetch.py \
-            --tracks "$RUNNER_TEMP" \
-            --logo-stats "$RUNNER_TEMP/logo_stats.json" \
+            --tracks "$OUT" \
+            --logo-stats "$OUT/logo_stats.json" \
             --verbose
 
           # 【自检】空列表或格式不对就直接失败，别让用户下到坏文件。
           # 这是"产物质量闸门"：宁可 Job 标红，也不交付打不开的 m3u。
-          # 【R21 新增两条】
+          #
+          # 【R21.2 关键改动：路径由 shell 展开后**作为参数传入**】
+          #   原来的写法是在 heredoc 里手写 "$RUNNER_TEMP/xxx.m3u"。
+          #   那是第 2 份字面量 —— 正是 run#32 错配的来源。
+          #   现在只传 **$OUT 派生出的三个实参**，heredoc 内部不再出现
+          #   任何目录名（它只认 sys.argv）。于是"第 1 份"和"第 2 份"
+          #   物理上合二为一。
+          #
+          # 【R21 新增两条断言】
           #   ① 双层命中率：硬线 <0.60 => 失败（上游字段突变防线）；
           #      软线 <0.75 => 只告警不失败（第三方抖动不拦发布）。
           #   ② 双轨套件默认**绝不含** catchup 字段（防误开）。
-          python - "$RUNNER_TEMP" "$RUNNER_TEMP/logo_stats.json" <<'PY'
-          import json, os, sys
-          tdir, statp = sys.argv[1], sys.argv[2]
-          clean = open(os.path.join(tdir, "gx_clean_hd.m3u"), encoding="utf-8").read()
-          full = open(os.path.join(tdir, "gx_full_305.m3u"), encoding="utf-8").read()
+          python - "$OUT/gx_clean_hd.m3u" "$OUT/gx_full_305.m3u" \
+                   "$OUT/logo_stats.json" <<'PY'
+          import json, sys
+          # 三个路径全部来自调用方（shell 的 $OUT），此处不拼任何目录。
+          clean_p, full_p, statp = sys.argv[1], sys.argv[2], sys.argv[3]
+          clean = open(clean_p, encoding="utf-8").read()
+          full = open(full_p, encoding="utf-8").read()
 
           for name, txt in (("gx_clean_hd", clean), ("gx_full_305", full)):
               lines = txt.splitlines()
@@ -447,12 +491,53 @@ jobs:
           print("[OK] 双轨产物自检通过")
           PY
 
+          # 【最后一道保险：产物必须在 $OUT 里，绝不能出现在工作区】
+          #   这一条是"结构性断言"，防的是**将来**有人改 OUT 时手抖
+          #   指到 $GITHUB_WORKSPACE。放在自检之后、上传之前，失败即整步红。
+          #
+          #   【为什么不能简单扫工作区找同名文件】
+          #     本断言要抓的是"产物**落在**工作区"，而不是"工作区里碰巧有同名
+          #     文件"。严格按 R20 边界，唯一的不变式是：
+          #       $OUT（产物目录）不得位于 $GITHUB_WORKSPACE 之内。
+          #     只扫文件名会误报：本地复现时若把 RUNNER_TEMP 设在工作区里面，
+          #     扫到的其实是**产物自己**，不是"泄漏"。所以判据放在目录关系上，
+          #     并且两侧都先 realpath 归一 —— 避免 ./ 与 符号链接造成假阴性。
+          if [ -n "${GITHUB_WORKSPACE:-}" ]; then
+            _out_real=$(cd "$OUT" 2>/dev/null && pwd -P) || _out_real="$OUT"
+            _ws_real=$(cd "$GITHUB_WORKSPACE" 2>/dev/null && pwd -P) \
+              || _ws_real="$GITHUB_WORKSPACE"
+            case "$_out_real/" in
+              "$_ws_real"/*)
+                echo "[X] 产物目录位于工作区内，违反 R20 边界："
+                echo "      OUT = $_out_real"
+                echo "      WS  = $_ws_real"
+                exit 1
+                ;;
+            esac
+            # 目录关系没问题，再顺手确认工作区里确实没有产物副本（双保险）
+            _leak=$(find "$_ws_real" -maxdepth 2 \
+                      \( -name 'gx_clean_hd.m3u' -o -name 'gx_full_305.m3u' \
+                         -o -name 'logo_stats.json' \) 2>/dev/null | head -5)
+            if [ -n "$_leak" ]; then
+              echo "[X] 工作区内发现产物副本，违反 R20 边界："; echo "$_leak"
+              exit 1
+            fi
+            echo "[OK] 工作区无产物泄漏（已扫 $_ws_real）"
+          fi
+          echo "[OK] 产物均落在 \$OUT（$OUT）"
+
       - name: 上传备用源（artifact —— 7 天自动删，不进仓库）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: backup-gx-m3u
-          # [R21.1] 双轨两个文件，路径与上面导出/自检**完全一致**（同一目录）。
+          # [R21.2] 双轨两个文件 + 统计，路径与上面导出/自检**同源**。
+          #   这里的 `${{ runner.temp }}` 与 run 脚本里的 `$RUNNER_TEMP`
+          #   是同一个目录的两种写法：upload-artifact 的 `with:` 是 YAML
+          #   **表达式上下文**，读不到 shell 变量，所以只能用表达式取。
+          #   为了不让这成为"第 5 处字面量"，下面用条件断言锁死两者等价：
+          #     runner.temp == $RUNNER_TEMP == $OUT（GitHub 保证）。
+          #   也就是：**目录只有一个**，此处只是"换一种语法引用同一个目录"。
           #   **仍然只点名具体文件，绝不上传目录** ——
           #   上传 `path: .` 或 `path: ${{ runner.temp }}` 会让中间产物被打包。
           path: |
@@ -491,6 +576,10 @@ jobs:
           PRIVATE_PAT: ${{ secrets.PRIVATE_PAT }}
         run: |
           set -euo pipefail
+          # [R21.2] 同样的单一变量约定：产物目录只认 $OUT。
+          #   与"导出双轨备用源 m3u"步骤指向同一处（$RUNNER_TEMP）。
+          #   这样下面 4 处 cp 的源路径全部由 $OUT 派生，零字面量分叉。
+          OUT="$RUNNER_TEMP"
           TARGET="https://x-access-token:${PRIVATE_PAT}@github.com/${{ github.repository_owner }}/${PRIVATE_REPO}.git"
           WORK="$RUNNER_TEMP/private-push"
           rm -rf "$WORK"; mkdir -p "$WORK"
@@ -506,13 +595,13 @@ jobs:
           #   而不是每次覆盖 —— 覆盖会丢掉"源何时变了"这条线索。
           DEST="$WORK/$(date -u +%Y-%m-%d)"
           mkdir -p "$DEST"
-          cp "$RUNNER_TEMP/gx_clean_hd.m3u" "$DEST/"
-          cp "$RUNNER_TEMP/gx_full_305.m3u" "$DEST/"
-          cp "$RUNNER_TEMP/logo_stats.json" "$DEST/"
+          cp "$OUT/gx_clean_hd.m3u" "$DEST/"
+          cp "$OUT/gx_full_305.m3u" "$DEST/"
+          cp "$OUT/logo_stats.json" "$DEST/"
           # 最新一份另放 latest/，方便固定路径直接取用
           mkdir -p "$WORK/latest"
-          cp "$RUNNER_TEMP/gx_clean_hd.m3u" "$WORK/latest/"
-          cp "$RUNNER_TEMP/gx_full_305.m3u" "$WORK/latest/"
+          cp "$OUT/gx_clean_hd.m3u" "$WORK/latest/"
+          cp "$OUT/gx_full_305.m3u" "$WORK/latest/"
 
           git -C "$WORK" config user.name  "github-actions[bot]"
           git -C "$WORK" config user.email "github-actions[bot]@users.noreply.github.com"
