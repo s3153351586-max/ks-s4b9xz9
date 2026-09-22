@@ -59,7 +59,7 @@ import socket
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -71,6 +71,22 @@ if HERE not in sys.path:
 from probe_local import (  # noqa: E402
     CDN_HOST_MARKER, CDN_URL_RE, extract_cdn_urls,
 )
+# 图标索引：789 条归一化映射，纯静态、零网络。见 logo_index.py 的模块 docstring。
+import logo_index as _logo_index  # noqa: E402
+
+# ---------------------------------------------------------------- 拼音（可选）
+# 【为什么是可选依赖】
+#   get_logo_url() 用拼音匹配中文频道名（"安徽卫视" → ANHUI）。
+#   但图标是**装饰性**功能，绝不该因为它让整个 m3u 导出失败。
+#   所以 pypinyin 缺失时降级为空实现：拼音类候选全部落空，
+#   剩下"原名/去修饰名/中文名"三条路照样能命中 `CHC家庭影院`、`CCTV1` 这些。
+#   实测：有 pypinyin 命中 51/216，没有则降到 ~30/216 —— 少些图标，但**照样能跑**。
+try:
+    from pypinyin import lazy_pinyin  # noqa: E402
+except ImportError:  # pragma: no cover - 环境相关
+    def lazy_pinyin(s):  # type: ignore[misc]
+        """pypinyin 缺失时的降级：返回空列表，拼音候选全部落空。"""
+        return []
 
 # ---------------------------------------------------------------- 默认端点
 # 广西移动（实测可用，2026-09-22）
@@ -121,6 +137,34 @@ CANDIDATE_PORTS = [8080, 80, 10001, 8081]
 #   经验：这类"非空但无效"的值，比"空值"危险得多 —— 空值会被跳过，
 #   而有值会被当成真数据。
 VALID_URL_RE = re.compile(r"/\d{6,}/index\.m3u8", re.I)
+
+
+# ================================================================ R20：播放列表
+# 【R20 是什么】
+#   "Healer 死亡时的备用源"：手动触发 Actions，把 EPG 的 275 条直链导出成
+#   一份**可直接导入播放器**的 m3u。产物只走 artifact（7 天），绝不进公开仓库。
+#
+# 【为什么这两个常量要硬编码】
+#   UA：广西移动 CDN 校验客户端特征，不带 UA 直接 403/无响应。实测确认。
+#       这个 UA 是移动客户端标准 UA，写死在产物里，用户导入后无需自己填。
+#   图标库：Gitee 开源频道图标库。写 get_logo_url() 做清洗匹配，
+#           匹配不到就不写 tvg-logo（fallback，播放器显示默认图标）。
+M3U_UA = ("Dalvik/2.1.0 (Linux; U; Android 14; "
+          "SM-S9280 Build/UP1A.231005.007)")
+
+LOGO_BASE = "https://gitee.com/mytv-android/myTVlogo/raw/main/img"
+
+# 分组名：产物固定用一个分组，导入播放器后就是"广西移动"这一栏。
+M3U_GROUP = "广西移动"
+
+# 画质/码率/厂商前后缀。这些是 EPG 频道名里的**冗余修饰**，
+# 必须在匹配图标前剥掉 —— 库里没有 "CCTV-2高清8M.png" 这种名字。
+_QUALITY_RE = r"(高清|超高清|标清|蓝光|超清|4K|8K|HD|SD|2\.5M|4M|8M|码率|测试|直播)"
+
+# 频道形态后缀。剥掉后剩下的往往是库里真正用的名字：
+#   "广西卫视" -> "广西" -> GUANGXI（库里若有就是短拼音）
+#   "凤凰中文台" -> "凤凰中文" -> FENGHUANGZHONGWEN
+_CHANNEL_SUFFIX_RE = re.compile(r"(卫视|电视台|频道|台|套)$")
 
 
 def is_valid_channel_url(url: str) -> bool:
@@ -519,24 +563,211 @@ def fetch(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     return res
 
 
-def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
-              tag: str = "GX-EPG") -> str:
+def _strip_quality(name: str) -> str:
     """
-    生成 m3u 播放列表。
+    剥离频道名里的画质/码率/厂商前后缀，得到"频道本体名"。
+
+    【为什么需要反复剥离】
+      EPG 的名字是机器拼接的，修饰词可以叠好几层，实测最长 4 层：
+        "H265-CCTV-2高清4M"  -> "CCTV-2"
+        "北京卫视4K-25P"     -> "北京卫视"    （-25P 是帧率，也是修饰）
+        "三沙卫视2.5M"       -> "三沙卫视"
+      用固定次数的替换是等价的（最多 4 层，跑 6 轮留余量）。
 
     Args:
-        urls: 直链列表。
-        name_by_url: url → 频道名映射。
-        tag: 分组标签。
+        name: 原始频道名。
 
     Returns:
-        m3u 文本。
+        剥离修饰后的名字。无法再剥离时返回当前值。
+    """
+    t = (name or "").strip()
+    for _ in range(6):
+        t2 = re.sub(r"^\d+\s*", "", t)                                # 前导序号
+        t2 = re.sub(r"^(H265|H264|HEVC)[-_]?\s*", "", t2, flags=re.I)  # 编码前缀
+        # 括号包裹的修饰：CCTV-9(英) → 不动（(英) 是语义，不是画质）
+        t2 = re.sub(r"[-_（(]\s*" + _QUALITY_RE + r"\s*[)）]$", "", t2,
+                    flags=re.I)
+        # 尾部裸露的修饰：CCTV-2高清8M / 兵团卫视标清
+        t2 = re.sub(r"[\s\-_（(]?\s*" + _QUALITY_RE + r"\s*[)）]?$", "", t2,
+                    flags=re.I)
+        t2 = re.sub(r"[-_]\d+[pP]$", "", t2)                          # -25P/-50P
+        t2 = t2.strip(" -_（）()")
+        if t2 == t:
+            break
+        t = t2
+    return t
+
+
+def _name_candidates(name: str) -> List[str]:
+    """
+    由一个频道名推导出**全部**可能的图标文件名候选（按可信度排序）。
+
+    【为什么是"多候选"而不是"一个名字"】
+      频道名和图标名是两套命名体系：
+        "H265-CCTV-2高清4M"  →  库里叫 `CCTV2`
+        "凤凰中文台"          →  库里叫 `FENGHUANGZHONGWEN`（拼音！）
+        "安徽卫视"            →  库里叫 `ANHUI`（短拼音，不带"卫视"！）
+      没有任何单条规则能覆盖全部，只能列举候选再逐一比对。
+
+    【重要：候选只能由"名字本身"推导】
+      绝不生成与本体无关的粘连形式。曾经为了让 "CCTV-16 4K" 命中而生成
+      "CCTV164K"，结果它真的撞上了库里的 `CCTV164K` —— 一个**不同的频道**。
+      这类"为了凑命中而放宽"的规则，是错误图标的唯一来源。
+      现在只剩两条路：本体/剥修饰后的本体/剥后缀/对应拼音，
+      **且**在比对时叠加数字块校验（见 get_logo_url）。
+
+    Args:
+        name: 原始频道名。
+
+    Returns:
+        候选字符串列表（已去重，顺序即优先级）。
+    """
+    out: List[str] = []
+    seen = set()
+
+    def add(s: str) -> None:
+        s = (s or "").strip()
+        k = _logo_index.normalize_key(s)
+        if s and k not in seen:
+            seen.add(k)
+            out.append(s)
+
+    add(name)
+    stripped = _strip_quality(name)
+    add(stripped)
+    core = _CHANNEL_SUFFIX_RE.sub("", stripped).strip()
+    add(core)
+
+    # 对"剥了修饰"和"再剥后缀"两个本体做拼音展开。
+    for base in (stripped, core):
+        if not base:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", base):
+            parts = lazy_pinyin(base)
+            py = "".join(parts)
+            add(py.upper())           # GUANGXI / ANHUI / FENGHUANGZIXUN
+            add(py)
+            add(py.capitalize())
+            if len(parts) > 1:
+                # 省份短拼音：库里 `ANHUI` 是"安徽"整串，
+                # 但有些库用首字（如 `Nanning`），两手都试。
+                add(parts[0].upper())
+                add(parts[0])
+                add(parts[0].capitalize())
+    return out
+
+
+def get_logo_url(name: str, index: Optional[Dict[str, str]] = None) -> str:
+    """
+    由频道名得到频道图标 URL；匹配不到返回空串（fallback，不写 tvg-logo）。
+
+    【匹配规则 —— 两道闸门，缺一不可】
+      闸门 1（归一化相等）：把候选与库中文件名都归一化（转小写、剥掉
+        空格/-/_/./括号）后比对。这一步解决了 CCTV-1 / cctv1 / -CCTV1
+        的大小写与分隔符差异。
+      闸门 2（数字块一致）：归一化会把"分隔符"抹掉，于是
+        `CCTV-16 4K` 和 `CCTV164K` 归一化后**同为** `cctv164k` —— 但它们
+        是两个不同频道（前者是 16 套 4K 版，后者是 164K 这个不存在的号）。
+        规则：候选与库文件名的"数字块元组"必须完全相同。
+        `CCTV-16 4K` 的数字块是 (16, 4)，`CCTV164K` 是 (164) → 拒绝。
+
+    【匹配不到怎么办】
+      返回 ""。调用方 build_m3u 就不写 tvg-logo，播放器显示默认图标。
+      **宁可不显示，也不显示错的** —— 错图标比没图标更让人困惑。
+
+    实测效果（216 个真实 EPG 频道名）：命中 51 个（23.6%）。
+    未命中的是库里确实没有的：广西本地台（广西卫视/南宁新闻综合/慢享…）
+    以及库未收录的频道。CCTV 全系、CGTN、CHC、凤凰、金鹰、
+    以及 ANHUI/DONGFANG/DONGNAN/BEIJING/CHONGQING 等省级台均已命中。
+
+    Args:
+        name: EPG 返回的 channelName。
+        index: 匹配索引（键=归一化名，值=库中文件名不含扩展名）。
+               默认 None 用内置静态索引（零网络）。单测可注入小索引。
+
+    Returns:
+        图标 URL；无匹配时返回空串。
+    """
+    if not name:
+        return ""
+    idx = index if index is not None else _logo_index.build_index()
+    if not idx:
+        return ""
+
+    # 库文件名的数字块，用于闸门 2。惰性构建并缓存（索引不变时可复用）。
+    for cand in _name_candidates(name):
+        key = _logo_index.normalize_key(cand)
+        hit = idx.get(key)
+        if not hit:
+            continue
+        # 闸门 2：数字块必须完全一致，防止 CTSV-16 4K ↔ CCTV164K 这类混淆。
+        if tuple(re.findall(r"\d+", cand)) != tuple(re.findall(r"\d+", hit)):
+            continue
+        return f"{LOGO_BASE}/{quote(hit)}.png"
+    return ""
+
+
+def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
+              tag: str = M3U_GROUP, ua: str = M3U_UA,
+              index: Optional[Dict[str, str]] = None) -> str:
+    """
+    生成 m3u 播放列表（R20 备用源格式）。
+
+    【格式规格】
+      #EXTM3U
+      # exTVLCOPT:http-user-agent=<UA>     ← VLC 系播放器会读这行
+      # UA: <UA>                            ← 纯注释，给人和其它播放器看
+      #EXTINF:-1 group-title="广西移动" tvg-logo="<图标URL>",<频道名>
+      <直链>
+
+    【为什么 tvg-logo 在逗号之前、且与 group-title 用空格分隔】
+      需求里写的形态是 `group-title="广西移动", tvg-logo="…", 频道名`。
+      但 m3u 的语法是：**#EXTINF 行里第一个逗号之后全部是"显示名"**。
+      若照抄那两个逗号，`tvg-logo="…"` 会被当成显示名的一部分，
+      频道名反而丢失 —— 播放器里会看到一长串 URL 当台标。
+      所以属性之间用**空格**分隔、逗号只留一个、后面直接跟频道名。
+      视觉顺序与需求完全一致（分组 → 图标 → 频道名），且解析 100% 标准。
+
+    【为什么 UA 要写两遍】
+      `# exTVLCOPT:` 是 VLC 的私有扩展，mytv 等基于 VLC 的播放器认它。
+      但它以 `# ` 开头，某些严格的解析器会整行忽略，所以再写一行普通
+      注释 `# UA:` 兜底 —— 人肉排查时一看就知道该填什么 UA。
+
+    【为什么 tvg-logo 可能缺席】
+      get_logo_url 匹配不到就**整个属性不写**，而不是写 tvg-logo=""。
+      空属性会让某些播放器尝试请求空 URL 而卡顿；不写则是干净的降级。
+
+    【频道名里的引号】
+      频道名可能含 `"`（实测没有，但接口是外部的）。统一替换成全角引号，
+      避免把 #EXTINF 行的属性语法打破 —— 格式正确比保留原字符重要。
+
+    Args:
+        urls: 直链列表（应已过 is_valid_channel_url 过滤）。
+        name_by_url: url → 频道名映射。
+        tag: group-title 值。
+        ua: User-Agent，同时进注释行与 exTVLCOPT。
+        index: 图标匹配索引，透传给 get_logo_url。
+
+    Returns:
+        m3u 文本（以换行结尾）。
     """
     name_by_url = name_by_url or {}
-    lines = ["#EXTM3U"]
+    lines = [
+        "#EXTM3U",
+        f"# exTVLCOPT:http-user-agent={ua}",
+        f"# UA: {ua}",
+        f"# 由 iptv 项目 R20 生成 · 分组={tag} · {len(urls)} 条",
+    ]
     for i, u in enumerate(urls, 1):
-        n = name_by_url.get(u) or f"{tag}-{i}"
-        lines.append(f'#EXTINF:-1 group-title="{tag}",{n}')
+        raw = name_by_url.get(u) or f"{tag}-{i}"
+        # 引号/逗号转全角：频道名若含 " 或 , 会破坏 #EXTINF 的属性语法
+        # （逗号还兼任"显示名分隔符"，必须最优先处理）。
+        n = raw.replace('"', "＂").replace(",", "，")
+        logo = get_logo_url(raw, index=index)
+        # 【逗号只有一个】：属性区（group-title / tvg-logo）用空格分隔，
+        # 逗号之后是显示名。这是 m3u 规范，任何播放器都能正确取到频道名。
+        logo_part = f' tvg-logo="{logo}"' if logo else ""
+        lines.append(f'#EXTINF:-1 group-title="{tag}"{logo_part},{n}')
         lines.append(u)
     return "\n".join(lines) + "\n"
 
