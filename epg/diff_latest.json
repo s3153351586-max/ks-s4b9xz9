@@ -1,0 +1,44 @@
+{
+  "version": "r18",
+  "generated_at": "2026-09-22T18:49:55.757380+08:00",
+  "normalization_rule": "strip-query+strip-trailing-slash",
+  "epg_stage": "ok",
+  "epg_ok": true,
+  "healer_fetch_ok": true,
+  "epg_count": 275,
+  "healer_count": 148,
+  "intersect": 119,
+  "epg_only_count": 156,
+  "healer_only_count": 29,
+  "union_count": 304,
+  "jaccard": 0.3914,
+  "placeholder_count": 1,
+  "multi_name_groups": 4,
+  "raw_channel_count": 305,
+  "channel_names_top": [],
+  "baseline": {
+    "warmup": true,
+    "window_days": 7,
+    "samples": 0,
+    "medians": {
+      "healer_count": null,
+      "epg_count": null,
+      "jaccard": null
+    }
+  },
+  "drift": {
+    "R-a": false,
+    "R-a_detail": "",
+    "R-b": false,
+    "R-b_detail": "",
+    "R-c": false,
+    "R-c_detail": "",
+    "R-d": false,
+    "R-d_detail": "",
+    "worst": "none"
+  },
+  "meta": {
+    "healer_fetch_note": "OK 42921B",
+    "note": "Healer m3u 抽到 148 条直链"
+  }
+}
