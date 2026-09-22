@@ -77,6 +77,50 @@ jobs:
           python tools/summarize_probe.py report.json
 
       # ---------------------------------------------------------------------
+      # Step A2（R18）：EPG 取数 + 与 Healer 对比（上游死亡预警）
+      # ---------------------------------------------------------------------
+      # 【这一步在做什么】
+      #   1. 拉官方 EPG 频道表（公网可达，实测 305 频道）
+      #   2. 与 Healer gx.m3u 做 masked 对比（计数/交集/Jaccard）
+      #   3. 偏离超阈值 → 说明"上游可能已死"，走告警链路
+      #
+      # 【为什么 continue-on-error: true】
+      #   EPG 挂了不能阻断发布 —— 同 Step A 的哲学：
+      #   "全挂了"本身就是一条必须被发布的告警。
+      #   注意：这只对**取数**宽容；脱敏闸门（在 publish 内部）是**硬中断**，
+      #   宁可发布失败也不泄漏。
+      #
+      # 【⚠️ 产物安全 —— 这一步产生两个文件，命运完全不同】
+      #   epg_raw.json  ← **含内网直链**！只存在于 runner 临时目录，
+      #                   绝不上传 artifact、绝不进仓库。运行结束即随 runner 销毁。
+      #   epg_diff.json ← 已脱敏（只有计数），可上传 artifact、可进仓库。
+      #   改动这一步时务必保持这个边界。
+      - name: EPG 取数 + 与 Healer 对比（上游死亡预警）
+        id: epg_diff
+        continue-on-error: true
+        run: |
+          # 取数：--raw-urls 输出含直链，仅写 $RUNNER_TEMP（CI 内部用）
+          python tools/gx_epg_fetch.py \
+            --raw-urls "$RUNNER_TEMP/epg_raw.json" \
+            --json "$RUNNER_TEMP/epg_masked.json" \
+            --verbose || true
+
+          # 对比：产出 masked 报告（无 URL / 无 host / 只有计数）
+          python tools/epg_diff.py \
+            --epg-raw "$RUNNER_TEMP/epg_raw.json" \
+            --healer-url "https://gh-proxy.com/raw.githubusercontent.com/Healer-sys/Home/refs/heads/main/iptv/gx.m3u" \
+            --history-dir "$HOME/gh-pages-worktree/epg/history" \
+            --out "$RUNNER_TEMP/epg_diff.json" \
+            --verbose || true
+
+      # 记录对比结论（R-b 为 critical 时会在日志里显眼）
+      - name: 记录 EPG 漂移结论
+        if: always()
+        run: |
+          python tools/epg_diff.py --summary-of "$RUNNER_TEMP/epg_diff.json" || \
+            echo "[epg] 无对比报告（取数或对比失败，不阻断发布）"
+
+      # ---------------------------------------------------------------------
       # Step B：发布（脱敏 + 推 gh-pages）
       # ---------------------------------------------------------------------
       # 凭据用内置 GITHUB_TOKEN（由上面的 permissions 注入）。
@@ -97,6 +141,7 @@ jobs:
             --remote "https://github.com/${{ github.repository }}.git" \
             --branch gh-pages \
             --dashboard-html index.html \
+            --epg-diff "$RUNNER_TEMP/epg_diff.json" \
             --emit-notify-marker "$RUNNER_TEMP/notify_pending.json" \
             --push
         env:
@@ -121,31 +166,43 @@ jobs:
           fi
 
       # ---------------------------------------------------------------------
-      # Step C：微信推送（R16）
+      # Step C：微信推送（可选，默认不启用）
       # ---------------------------------------------------------------------
+      # 【当前状态：未启用】
+      #   PushPlus / WxPusher 这类服务要付费，暂不接。
+      #   不配 PUSH_TOKEN 时本步骤**会被 if 直接跳过**（根本不会执行），
+      #   所以在 Actions 页面看不到它，也不会有任何噪音。
+      #
+      # 【想启用时怎么做】
+      #   1. Settings → Secrets and variables → Actions → New repository secret
+      #      Name = PUSH_TOKEN，Value = PushPlus 的 32 位 token
+      #      （没配 token 就永远走不到这里，这是刻意的——不配即不启用）
+      #   2. 当天有「状态翻转」时自动推送，无需其它操作
+      #
       # 【为什么放在 publish 之后】
       #   推送的内容来自 status/latest.json —— 那是 publish 步骤的产物。
       #   顺序反了就只能推上一次的数据。
       #
-      # 【continue-on-error: true —— R16-4】
+      # 【continue-on-error: true】
       #   推送失败**绝不能**阻断发布。发布是资产（看板 + 归档），推送只是通知；
-      #   因为微信接口抖了一下就丢掉当天的数据，是本末倒置。
+      #   因为推送接口抖了一下就丢掉当天的数据，是本末倒置。
       #   失败会计入 status 的 push_failures，留痕但不阻断。
       #
-      # 【if 条件】
-      #   读 publish 刚写出的 status/latest.json，只在通知状态机判定 send=true
-      #   时才真正推送（首次告警 / 恢复 / 早报）。状态机在 publish_cloud.py 里，
-      #   这里只消费它的结论 —— 避免两处各判一次导致口径漂移。
+      # 【if 条件的三道门】
+      #   1. secrets.PUSH_TOKEN != '' —— 没配 token 直接跳过（不启用）
+      #   2. 状态机判定 send=true（新告警 / 恢复 / 早报）—— 避免重复轰炸
+      #   3. always() —— 即使 publish 挂了也要能报警
       #
-      # 【早报开关（R16-5，默认关）】
-      #   想开早报：把下面的 vars.IPTV_DAILY_REPORT 改成 '1'
-      #   （Settings → Variables → Actions → New repository variable）。
+      # 【早报开关（默认关）】
+      #   想开早报：设仓库变量 IPTV_DAILY_REPORT=1
+      #   （Settings → Variables → Actions → New repository variable）
       #   用 vars 而不是 secrets：它不是敏感信息，且需要在 if 里可读。
-      - name: 微信推送（仅状态翻转时）
+      - name: 微信推送（可选，未配 PUSH_TOKEN 则跳过）
         id: notify
         continue-on-error: true
         if: >-
           always() &&
+          secrets.PUSH_TOKEN != '' &&
           (vars.IPTV_DAILY_REPORT == '1' ||
            hashFiles('spool/notify_pending.json') != '')
         run: |
@@ -154,16 +211,23 @@ jobs:
             --report report.json \
             --pages-url "${{ steps.pages_url.outputs.pages_url }}"
         env:
-          # 凭据走 Secrets，代码零字面量。未配置时脚本静默跳过（不算失败）。
+          # 凭据走 Secrets，代码零字面量。
           PUSHPLUS_TOKEN: ${{ secrets.PUSH_TOKEN }}
+
       # ---------------------------------------------------------------------
       # Step D：保留体检原始报告（便于排查）
       # ---------------------------------------------------------------------
+      # ⚠️ 只上传 report.json 与 **已脱敏** 的 epg_diff.json。
+      #    epg_raw.json（含内网直链）**绝不上传** —— 即便它只是 artifact，
+      #    上传后也会长期留在 GitHub 上，等同泄漏。
+      #    并且：artifact 是"排查面"，**不是发布面** —— 看板与仓库只吃 gh-pages 产物。
       - name: 上传体检报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: probe-report
-          path: report.json
+          path: |
+            report.json
+            ${{ runner.temp }}/epg_diff.json
           retention-days: 7
           if-no-files-found: warn
