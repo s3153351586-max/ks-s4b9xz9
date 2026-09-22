@@ -1141,8 +1141,10 @@ def main() -> int:
                     help="targets 取样条数（默认 8；0 = 全量）")
     # ---- R21 新增 ----
     ap.add_argument("--tracks", metavar="DIR",
-                    help="R21 双轨输出目录：写 gx_clean_hd.m3u（精简高清轨）"
-                         "与 gx_full_305.m3u（全集轨）。同一次抓取、同一快照")
+                    help="R21 双轨输出**目录**（不是文件前缀）：在该目录下写 "
+                         "gx_clean_hd.m3u（精简高清轨）与 gx_full_305.m3u"
+                         "（全集轨）。同一次抓取、同一快照。传相对路径按"
+                         "当前工作目录解析；CI 里应传 $RUNNER_TEMP")
     ap.add_argument("--logo-stats", metavar="PATH",
                     help="R21 把台标命中率统计写成 JSON（供 CI 断言消费）")
     ap.add_argument("--enable-catchup", action="store_true",
@@ -1279,7 +1281,13 @@ def main() -> int:
         clean_urls, full_urls = split_tracks(res["urls"], name_by_url)
         stats: Dict[str, Any] = {}
 
-        out_dir = os.path.dirname(os.path.abspath(args.tracks)) or "."
+        # 【--tracks 语义：目录，不是"文件前缀"】
+        #   R21.1 前的写法是 os.path.dirname(os.path.abspath(args.tracks))，
+        #   它把参数当"某个文件的路径"取其父目录 —— 于是传 "out" 得到 "",
+        #   产物落到**当前工作区**（CI 里就是 /home/runner/work/<repo>/<repo>/），
+        #   既违反"产物不落工作区"的边界，又让调用方猜不到文件在哪。
+        #   现在直接把它当目录用，与 --logo-stats 等其它 PATH 参数语义一致。
+        out_dir = os.path.abspath(args.tracks)
         os.makedirs(out_dir, exist_ok=True)
         clean_path = os.path.join(out_dir, "gx_clean_hd.m3u")
         full_path = os.path.join(out_dir, "gx_full_305.m3u")
