@@ -189,14 +189,21 @@
     return '<span class="pill '+x[0]+'">'+x[1]+'</span>';
   }
   // 象限：按 cloud x local 落在哪个格子，返回中文一句话
+  //
+  // 【顺序至关重要】ls==="unknown" 必须**先于** skip 分支判断。
+  //   否则 `cs==="skip" && ls==="unknown"`（云端免测 + 家里缺报）会掉进
+  //   `cs==="skip" && ls==="ok"` 之外的缝里，或被下面 targets 聚合按
+  //   "cloud skip 一律算内网源"的旧规则误计入 intranet_alive。
+  //   那一格的真实语义是**信息真空**：两条数据都没有，不是"存活"。
   function quadrant(cs, ls){
+    // 家里没数据 → 一律灰格（无论云端是 ok / fail / skip）
+    if(ls==="unknown")             return {k:"no_local",   t:"家里视角缺报",  d:"本地探针未上报，内网状态未知"};
     if(cs==="ok"  && ls==="ok")    return {k:"all_pass",  t:"双端可达",       d:"云端与家里均能取到，正常"};
     if(cs==="ok"  && ls==="fail")  return {k:"local_block",t:"本地通道被墙",  d:"云端通、家里不通：本地通道问题（需代理）"};
     if(cs==="fail"&& ls==="ok")    return {k:"geo_block",  t:"境外封锁/内网可播",d:"云端不通、家里通：运营商封外省，非故障"};
     if(cs==="fail"&& ls==="fail")  return {k:"source_dead",t:"疑似源真死",     d:"两端都不通，需切备用源"};
     if(cs==="skip"&& ls==="ok")    return {k:"intranet_alive",t:"内网源存活",  d:"云端免测 + 家里可用：健康常态，不告警"};
     if(cs==="skip"&& ls==="fail")  return {k:"intranet_dead",t:"内网源失效",   d:"云端免测 + 家里也不通：切备用线路"};
-    if(ls==="unknown")             return {k:"no_local",   t:"家里视角缺报",  d:"本地探针未上报，内网状态未知"};
     return {k:"unknown", t:"数据不足", d:"该源缺少一侧数据"};
   }
 
@@ -305,7 +312,30 @@
     var localStale = fresh.stale === true;
 
     var banner, msg, detail;
-    if(ns === "lan_down" || ns === "wan_down"){
+    // 【R18 收口 · 横幅优先级】
+    //   local_freshness.stale=true（家里超过 24h 没上报）时，横幅**必须**是
+    //   灰/黄"家里视角缺报（人工确认）"，**覆盖任何 network_state**。
+    //
+    //   为什么必须放在最前：
+    //     缺报时 network_state 是**无意义的**——云端根本无从知道家里的网络。
+    //     若让它排在前面，云端沙箱里 N1（192.168.1.1）必然 timeout → lan_down
+    //     → 渲染出"家里网络断了（路由器/局域网）"，而真相是"我们不知道，
+    //     而且探针已停摆 24h 以上"。**把"不知道"渲染成"确知故障"是最坏的误报**：
+    //     它会把人的注意力引向一个根本不存在的路由器故障。
+    //
+    //   语义定级：缺报 = 不确定 ≠ 故障。红色只留给"确知有问题"。
+    if(localStale){
+      banner = "warn";
+      msg = "⚪ 家里视角缺报（人工确认）";
+      detail = (fresh.note || "本地探针超过 24 小时未上报")
+             + (ns && ns !== "net_unknown"
+                ? "。云端网络判定本次不可用（家里没上报，无从得知），已忽略。"
+                : "。")
+             + "云端视角" + (alarms.length ? "有 " + alarms.length + " 项待处理"
+                                          : "正常")
+             + "；家里情况请开电视人工确认。";
+    } else if(ns === "lan_down" || ns === "wan_down"){
+      // 走到这里说明**家里在正常上报** —— 这个判定才有资格叫"家里网络断了"
       banner = "bad";
       msg = "🔴 " + (ns==="lan_down" ? "家里网络断了（路由器/局域网）"
                                      : "宽带断了（运营商线路）");
@@ -316,12 +346,6 @@
       banner = "bad";
       msg = "🔴 有 " + alarms.length + " 项需要处理";
       detail = "涉及：" + alarms.join("、") + "。详见下方明细。";
-    } else if(localStale){
-      // 灰/黄而非红：不确定 ≠ 故障。红色是留给"确知有问题"的。
-      banner = "warn";
-      msg = "⚪ 家里视角缺报（人工确认）";
-      detail = (fresh.note || "本地探针超过 24 小时未上报")
-             + "。云端视角正常；家里情况请开电视人工确认。";
     } else if(verdicts.intranet_alive && !verdicts.source_dead){
       banner = "ok";
       msg = "🟢 一切正常";
@@ -359,12 +383,25 @@
     // ---- 四象限卡片：以最近一次数据统计落点 ----
     var q = {all_pass:0, local_block:0, geo_block:0, source_dead:0,
              intranet_alive:0, intranet_dead:0, no_local:0, unknown:0};
+    // 【R18 收口修正】此前这里写死 `if(stateOf(t)==="skip") k="intranet_alive"`，
+    //   即"云端免测一律算内网源存活"。但家里缺报时，skip_cloud 目标**一条
+    //   本地数据都没有**，把它计入 intranet_alive 会造成
+    //   "内网源存活·本次命中"的假阳性 —— 明明什么都没测。
+    //   现在改为：先按 cloud×local 落格，local 无数据时一律走 no_local（灰格）。
+    //   local 完全缺报时，看板不臆测任何内网结论。
+    var localMissing = localStale || !status;
     targets.forEach(function(t){
-      var k = quadrant(stateOf(t), "unknown").k;
-      if(stateOf(t) === "skip") k = "intranet_alive";   // 云端 skip 一律按内网源归类
+      var k;
+      if(stateOf(t) === "skip"){
+        // 云端免测的目标：结论**只**取决于家里那一侧
+        k = localMissing ? "no_local" : "intranet_alive";
+      } else {
+        k = quadrant(stateOf(t), "unknown").k;
+      }
       q[k] = (q[k]||0) + 1;
     });
     // 有 status 时，用云端摘要的 verdicts 覆盖（更准，含家里侧）
+    //   no_local 也在覆盖范围内 —— 缺报时它才是正确的落点。
     Object.keys(verdicts).forEach(function(k){
       if(k in q) q[k] = Math.max(q[k], verdicts[k]);
     });
@@ -375,17 +412,22 @@
       ["intranet_alive","内网源存活","云端免测 家里✓"],
       ["local_block","本地通道被墙","云端✓ 家里✗"],
       ["source_dead","疑似源真死","云端✗ 家里✗"],
-      ["intranet_dead","内网源失效","云端免测 家里✗"]
+      ["intranet_dead","内网源失效","云端免测 家里✗"],
+      ["no_local","家里缺报（人工确认）","云端免测·家里未报"]
     ];
     var host = document.getElementById("matrix");
     host.innerHTML = cards.map(function(c){
       var n = q[c[0]] || 0;
-      var hit = n > 0 && c[0] !== "all_pass" ? " hit" : "";
+      // all_pass 是唯一的"正常态"，不该打"本次命中"标；
+      // no_local 是**信息真空**不是命中 —— 它也不打标（灰格语义靠文案区分）。
+      var markable = (c[0] !== "all_pass" && c[0] !== "no_local");
+      var hit = n > 0 && markable ? " hit" : "";
       var color = (c[0]==="source_dead"||c[0]==="intranet_dead") ? "var(--fail)"
                 : (c[0]==="local_block") ? "var(--warn)"
-                : (c[0]==="geo_block") ? "var(--accent)" : "var(--ok)";
+                : (c[0]==="geo_block") ? "var(--accent)"
+                : (c[0]==="no_local") ? "var(--dim)" : "var(--ok)";
       return '<div class="q'+hit+'">'+
-        (n>0?'<div class="rmark">本次命中</div>':'')+
+        (n>0 && markable ? '<div class="rmark">本次命中</div>':'')+
         '<div class="tag">'+esc(c[1])+'</div>'+
         '<div class="num" style="color:'+color+'">'+n+'</div>'+
         '<div class="desc">'+esc(c[2])+'</div></div>';
