@@ -1,10 +1,10 @@
 {
   "version": "v4.2",
-  "timestamp": "2026-09-22T10:49:52.826506",
+  "timestamp": "2026-09-22T12:45:57.970099",
   "probe_location": "cloud",
   "summary": {
-    "total": 11,
-    "counted": 8,
+    "total": 9,
+    "counted": 6,
     "skipped": 3,
     "alertable": 6,
     "ok_list": 3,
@@ -33,9 +33,9 @@
         "total_stream": 0
       },
       "baseline": {
-        "total": 2,
-        "ok": 1,
-        "fail": 1,
+        "total": 0,
+        "ok": 0,
+        "fail": 0,
         "ok_list": 0,
         "total_list": 0,
         "ok_stream": 0,
@@ -52,19 +52,19 @@
       }
     },
     "network": {
-      "status": "lan_down",
-      "state": "lan_down",
-      "label": "家里局域网/路由器问题",
-      "semantic": "家里 LAN / 路由器故障（默认网关不可达）",
-      "action": "先查路由器与网线，源侧结论本次无效",
-      "suppress_alarms": true,
-      "suppress": true,
-      "detail": "N1 默认网关不可达（timeout）——此时所有源失败都可能是本地网络导致，已抑制源告警"
+      "status": "net_unknown",
+      "state": "net_unknown",
+      "label": "无网络基线数据",
+      "semantic": "网络基线缺失或不足，无法判定本机网络健康",
+      "action": "不抑制源告警（无基线时不拿它当挡箭牌）",
+      "suppress_alarms": false,
+      "suppress": false,
+      "detail": "未探测 baseline 组"
     },
     "intranet": {
-      "status": "eco_all_down",
-      "label": "移动生态整体不可达（含网络基线）",
-      "detail": "B2i/B1/B1b 全挂且网络基线也失败 → 一级战备：核查本机网络并报障运营商",
+      "status": "eco_down",
+      "label": "移动生态域不可达",
+      "detail": "连运营商公网生态域都不可达（网络基线尚可）→ 疑似 DNS/路由/污染，二级战备：换 DNS 或切通道",
       "alias": "intranet_down"
     },
     "changes": {
@@ -81,7 +81,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 50,
+      "latency_ms": 252,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -95,7 +95,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 210,
+      "latency_ms": 370,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -109,7 +109,7 @@
       "scope": "public",
       "status": null,
       "ok": false,
-      "latency_ms": 3697,
+      "latency_ms": 1013,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -123,7 +123,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 24,
+      "latency_ms": 378,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -137,7 +137,7 @@
       "scope": "public",
       "status": 403,
       "ok": false,
-      "latency_ms": 2167,
+      "latency_ms": 4760,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -180,8 +180,8 @@
       "status": 200,
       "ok": true,
       "latency_ms": null,
-      "ttfb_ms": 181,
-      "speed_kbps": 36631.9,
+      "ttfb_ms": 203,
+      "speed_kbps": 24136.7,
       "change": null,
       "error": null,
       "hint": "该地址含505个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
@@ -199,34 +199,6 @@
       "change": null,
       "error": "skip_cloud",
       "hint": "内网源，云端不可测，交由本地探针"
-    },
-    {
-      "id": "N1",
-      "name": "默认网关",
-      "kind": "head",
-      "scope": "baseline",
-      "status": null,
-      "ok": false,
-      "latency_ms": null,
-      "ttfb_ms": null,
-      "speed_kbps": null,
-      "change": null,
-      "error": "timeout",
-      "hint": null
-    },
-    {
-      "id": "N2",
-      "name": "公网基线(DNS)",
-      "kind": "head",
-      "scope": "baseline",
-      "status": 404,
-      "ok": true,
-      "latency_ms": null,
-      "ttfb_ms": 404,
-      "speed_kbps": null,
-      "change": null,
-      "error": null,
-      "hint": "网络层可达（HTTP 404，服务端拒绝裸请求属正常）"
     }
   ],
   "meta": {

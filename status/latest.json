@@ -1,7 +1,7 @@
 {
   "version": "v4.2",
-  "published_at": "2026-09-22T18:49:56.046241+08:00",
-  "cloud_timestamp": "2026-09-22T10:49:52.826506",
+  "published_at": "2026-09-22T20:46:02.748275+08:00",
+  "cloud_timestamp": "2026-09-22T12:45:57.970099",
   "cloud_ok_stream": 1,
   "cloud_total_stream": 1,
   "cloud_ok_list": 3,
@@ -9,7 +9,7 @@
   "verdicts": {},
   "alarms": [],
   "suppressed": [],
-  "network_state": "lan_down",
+  "network_state": "net_unknown",
   "intranet_status": null,
   "epg_drift": {
     "epg_count": 275,
@@ -38,7 +38,7 @@
     "alarms_total": 0,
     "suppressed_total": 0,
     "pending_total": 0,
-    "first_run_at": "2026-09-22T18:49:56.046233+08:00",
+    "first_run_at": "2026-09-22T20:46:02.748263+08:00",
     "push_successes": 0,
     "push_failures": 0,
     "push_last_error": null
