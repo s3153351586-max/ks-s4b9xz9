@@ -96,6 +96,15 @@ NOTIFY_OK = "ok"
 NOTIFY_ALARM = "alarm"
 VALID_NOTIFY_STATES = (NOTIFY_OK, NOTIFY_ALARM)
 
+# 网络状态取值（与 probe_v4 保持一致；此处只用到 UNKNOWN 作缺省）
+#
+# 【为什么 publish_cloud 需要这个常量】
+#   R18 收口修正了一个语义误报：云端**无权**判定"家里网络状态"。
+#   `status/latest.json` 的 network_state 唯一合法来源是**本地摘要**；
+#   没有本地摘要（缺报）时必须是 `net_unknown`，而不是回落到云端自己
+#   baseline 组的结论（那必然是 lan_down —— 云端网关 192.168.1.1 打不通）。
+NET_UNKNOWN = "net_unknown"
+
 # 通知状态存放位置：孤儿分支上的一个单行文本文件。
 #
 # 【为什么不塞进 status/latest.json】
@@ -678,12 +687,18 @@ def build_status_summary(merged: Optional[Dict[str, Any]],
         out["verdicts"] = s.get("verdicts") or {}
         out["alarms"] = s.get("alarms") or []
         out["suppressed"] = s.get("suppressed") or []
-        out["network_state"] = s.get("network_state")
+        out["network_state"] = s.get("network_state") or NET_UNKNOWN
         out["intranet_status"] = ((merged.get("intranet") or {}).get("status"))
-    elif cloud_report:
-        # 未收到本地摘要：只给云端视角，手机侧自行补齐本地半格
-        net = ((cloud_report.get("summary") or {}).get("network") or {})
-        out["network_state"] = net.get("state")
+    else:
+        # 未收到本地摘要：network_state **只能是 net_unknown**。
+        # 【为什么不从 cloud_report 取（曾是 bug）】
+        #   旧代码在这里写 `net.get("state")`，把云端报告里 baseline 组的
+        #   判定当成"家里网络状态"。但云端 runner 在 GitHub 机房，N1 打的是
+        #   `192.168.1.1` —— 必然 timeout，必然 lan_down，于是看板渲染出
+        #   "家里网络断了"。云端根本没有"家里的网络"，这个字段它无权置喙。
+        #   现在 cloud 已不探测 baseline 组，但这里仍显式写死 net_unknown，
+        #   防止将来有人把 baseline 加回去时**又**悄悄复活这个误报。
+        out["network_state"] = NET_UNKNOWN
 
     # R18：EPG 漂移结论。
     # 【为什么把 R-a/R-b 推进 alarms】它们是"上游可能已死"的实质性告警，
