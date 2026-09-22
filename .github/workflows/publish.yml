@@ -13,6 +13,26 @@ on:
     #    极端情况下甚至跳过某次。这是官方已知行为，不是配置错误。
     - cron: '0 0 * * *'
   workflow_dispatch:      # 手动触发：仓库 Actions 页 → 本 workflow → Run workflow
+    # ---------------------------------------------------------------------
+    # R20：手动导出备用源（Healer 死亡时的保险）
+    # ---------------------------------------------------------------------
+    # 【为什么用 input 开关而不是单独建一个 workflow 文件】
+    #   两个原因：
+    #   1. 用户的验收路径是「Actions → publish-dashboard → Run workflow」，
+    #      一个页面勾一个框，比"去另一个 workflow 里找"少一次跳转。
+    #   2. 单独的 workflow 文件意味着独立的权限配置、独立的缓存、
+    #      独立的依赖安装 —— 多一份就多一处会腐坏的地方。
+    #
+    # 【默认 false —— 这是安全默认值】
+    #   直接点 Run workflow（不勾任何框）= 跑一次普通的日更发布。
+    #   只有显式勾上 export_backup，才会额外跑 export-backup Job。
+    #   顺序反了（默认 true）会让每次手动跑日更都顺手生成一份含内网直链的
+    #   artifact —— 那是**无意的泄漏面扩大**。
+    inputs:
+      export_backup:
+        description: '导出备用源 backup_gx.m3u（仅走 artifact，7 天自动删）'
+        type: boolean
+        default: false
 
 # 第二重保险：只用内置 GITHUB_TOKEN，不需要、也不使用任何长期 PAT。
 # contents: write 是推送到 gh-pages 分支所必需的最小权限。
@@ -202,7 +222,7 @@ jobs:
         continue-on-error: true
         if: >-
           always() &&
-          false &&
+          secrets.PUSH_TOKEN != '' &&
           (vars.IPTV_DAILY_REPORT == '1' ||
            hashFiles('spool/notify_pending.json') != '')
         run: |
@@ -231,3 +251,105 @@ jobs:
             ${{ runner.temp }}/epg_diff.json
           retention-days: 7
           if-no-files-found: warn
+
+  # ===========================================================================
+  # R20：export-backup —— Healer 死亡时的备用源导出
+  # ===========================================================================
+  # 【这是什么】
+  #   把官方 EPG 的 275 条内网直链导出成一份可直接导入播放器的 m3u
+  #   （backup_gx.m3u，带 UA 头 + 频道图标），作为 Healer gx.m3u 失效时的保险。
+  #
+  # 【与 publish Job 的三重物理隔离 —— 这是本 Job 最重要的设计约束】
+  #   1. **独立 Job**：不是 publish 里的一个 step。job 之间不共享工作区，
+  #      publish 推 gh-pages 的一切副作用都到不了这里。
+  #   2. **不 checkout gh-pages**：只 checkout main（下面的 checkout 步骤
+  #      明确写死 ref: main），连产物分支的引用都没有，无法误推。
+  #   3. **不 commit / 不 push**：全 Job 只有 1 个 upload-artifact 出口，
+  #      **没有任何 git commit / git push 命令**。这是可被断言验证的硬约束
+  #      （见 test_probe_v4.py 的 R20 章节）。
+  #
+  # 【为什么必须隔离到这种程度】
+  #   产物 backup_gx.m3u **含内网直链**（cdnrrs.gx.chinamobile.com/...）。
+  #   它一旦进 gh-pages（公开 Pages），就等于把用户家的网络拓扑图挂在网上。
+  #   接口泄露是"上游改一个 URL 就能修"的运维问题，而**泄漏是招来 DDoS
+  #   和封禁的资产问题**。两类风险不对等，所以隔离要做到结构性、而非纪律性。
+  #
+  # 【为什么走 artifact 而不是私有仓库 / 手机本地】
+  #   artifact 的可见性规则：公开仓库的 artifact **必须登录 GitHub 且有
+  #   仓库读权限**才能下载，且 retention 到期自动删除。它和"公开 gh-pages"
+  #   是两套完全不同的可见性。对"用户一个人用"的场景，这是零成本方案，
+  #   不需要 PAT、不需要额外的私有仓库、不需要在手机上装任何东西。
+  #
+  # 【触发条件为什么写成这样】
+  #   github.event_name == 'workflow_dispatch'  —— schedule 触发时
+  #     github.event.inputs 不存在，这个条件直接为假，定时任务绝不会
+  #     顺手生成含直链的 artifact。
+  #   github.event.inputs.export_backup == 'true'  —— boolean input 在
+  #     event.inputs 里是**字符串** 'true'/'false'（不是布尔），
+  #     写成 `== true` 会永远不成立。这个坑实测踩过。
+  export-backup:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.export_backup == 'true'
+    runs-on: ubuntu-latest
+    # 超时给足：EPG 取数 + 275 条直链写入，正常 1 分钟内完成，
+    # 但接口慢时要留余量（这是手动触发的兜底任务，宁可慢也别失败）。
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout 代码（main 分支，**不碰** gh-pages）
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 【为什么要单独装 pypinyin】
+          #   gx_epg_fetch 的图标匹配用拼音（"安徽卫视" → ANHUI）。
+          #   它是**可选**依赖：缺失时降级（少些图标）但绝不失败。
+          #   这里显式装上，把命中率从 ~30/216 提到 51/216。
+          pip install -r requirements.txt
+          pip install pypinyin==0.55.0
+
+      - name: 导出备用源 m3u
+        run: |
+          # 产物写到 $RUNNER_TEMP（**不是工作区**），从源头避免被
+          # 后续任何 checkout/commit 步骤扫到。
+          python tools/gx_epg_fetch.py \
+            --m3u "$RUNNER_TEMP/backup_gx.m3u" \
+            --verbose
+
+          # 【自检】空列表或格式不对就直接失败，别让用户下到一个坏文件。
+          # 这是"产物质量闸门"：宁可 Job 标红，也不交付一个打不开的 m3u。
+          python - "$RUNNER_TEMP/backup_gx.m3u" <<'PY'
+          import sys
+          p = sys.argv[1]
+          txt = open(p, encoding="utf-8").read()
+          lines = txt.splitlines()
+          assert lines and lines[0] == "#EXTM3U", "缺 #EXTM3U 头"
+          assert "dalvik/2.1.0" in txt.lower(), "缺 UA 头"
+          n_ext = sum(1 for l in lines if l.startswith("#EXTINF"))
+          assert n_ext >= 1, "没有任何频道"
+          assert "servicetype=1" in txt, "直链形态不对（不是移动 CDN）"
+          print(f"[✓] backup_gx.m3u 自检通过：{n_ext} 条频道")
+          PY
+
+      - name: 上传备用源（artifact —— 7 天自动删，不进仓库）
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-gx-m3u
+          # ⚠️ 只上传 /tmp 下的那一个文件。**绝不**上传任何目录 ——
+          #    上传 `path: .` 或 `path: ${{ runner.temp }}` 会让整个工作区/
+          #    临时目录被打包，其中可能混入 report.json、epg_raw.json 等
+          #    含内网信息的中间产物。只点名一个文件是最不容易出错的写法。
+          path: ${{ runner.temp }}/backup_gx.m3u
+          retention-days: 7
+          if-no-files-found: error
