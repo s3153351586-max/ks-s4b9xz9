@@ -1041,6 +1041,24 @@ _MATRIX_UNKNOWN = {
     "alarm": False,
 }
 
+# 家里视角缺报时的特例（R18 收口）。
+#
+# 【为什么需要单独一格，不能用 _MATRIX_UNKNOWN】
+#   `_MATRIX_UNKNOWN` 的 action 是"补齐两端探针数据"—— 但云端**永远补不了**
+#   intranet 侧的数据（R12a 已下放手机），这句建议是**做不到的事**。
+#   而且 `_MATRIX_UNKNOWN` 语义是"数据缺失待补"，会让人以为是采集故障；
+#   实际上这是**设计使然**：云端免测 + 家里还没报 = 信息真空，不是故障。
+#
+# 【这一格绝不告警】
+#   "不知道" ≠ "坏了"。红色只留给"确知有问题"。缺报是灰格。
+_MATRIX_NO_LOCAL = {
+    "verdict": "no_local",
+    "label": "家里缺报（云端免测·家里未报）",
+    "level": "unknown",
+    "action": "手机侧探针未上报，内网状态未知；开电视人工确认即可",
+    "alarm": False,
+}
+
 # intranet 源的特例：云端必然 skip（运营商封外省），本地可达即为「正常」。
 # 这一格**绝不能告警** —— 它是移动源的健康常态，不是故障。
 _MATRIX_INTRANET_OK = {
@@ -1078,13 +1096,19 @@ def _state_of(_id: str, results: Dict[tuple, Dict[str, Any]]) -> str:
 
 def _resolve_matrix(tid: str, scope: str, cs: str, ls: str) -> Dict[str, Any]:
     """把 (cloud_state, local_state) 翻译成定性结论。"""
-    # intranet 源特例优先：云端 skip 是设计使然，不能按「数据不足」处理
-    if scope == SCOPE_INTRANET:
+    # intranet/ecosystem 源特例优先：云端 skip 是设计使然，不能按「数据不足」处理。
+    #
+    # 【R18 收口修正】ls == "unknown" 时**必须**落到 no_local（灰格"家里缺报"），
+    #   而不是 _MATRIX_UNKNOWN。原因见 _MATRIX_NO_LOCAL 的注释：
+    #   云端补不了 intranet 数据，"补齐数据"是不可执行的建议；
+    #   且这一格曾导致 skip_cloud 目标在 local 缺报时被计入 intranet_alive
+    #   （"内网源存活·本次命中"）—— 明明一条数据都没有，却报"存活且命中"。
+    if scope in (SCOPE_INTRANET, SCOPE_ECOSYSTEM):
         if ls == "ok":
             return dict(_MATRIX_INTRANET_OK)
         if ls == "fail":
             return dict(_MATRIX_INTRANET_DEAD)
-        return dict(_MATRIX_UNKNOWN)
+        return dict(_MATRIX_NO_LOCAL)
 
     # public 源：skip 与 unknown 都按「该位置无数据」处理
     cs_n = "unknown" if cs == "skip" else cs
@@ -1683,27 +1707,35 @@ def parse_targets(path: Optional[str], scope_filter: Optional[str] = None,
     """
     解析目标，scope 缺省为 public（新增源默认 public，内网源须显式标 intranet）。
     scope_filter 非空时只保留该 scope 的目标（baseline 例外，见下）。
-    include_baseline=True 且使用内置源时，自动追加 intranet 组与 baseline 组（N1/N2）。
+    include_baseline=True 且使用内置源时，自动追加 intranet 组 + ecosystem 组
+    + baseline 组（N1/N2）。
 
-    【为什么 baseline 不受 scope_filter 约束】
-      baseline 是判定「网络是否健康」的上下文，不是被探测的「源」。若被
-      scope_filter 过滤掉，网络故障时就无从判定该抑制告警了。intranet 组则
-      照常受约束（云端默认不带，避免无意义的 skip 行）。
+    【为什么 intranet 组不带 location 门，baseline 组带】
+      intranet 组在云端**是要保留的** —— 它会被 `_should_skip` 跳过并渲染成
+      「云端免测」，这是 R12a「架构下放」在报告里的可见证据；顺带它还提供了
+      `_resolve_matrix` 判定 intranet 所需的 scope 信息。删掉它，看板上那几行
+      会凭空消失，用户无从知道"这些源是设计上不归云端管"。
+      baseline 组正相反：云端 runner 打 `192.168.1.1` 必然 timeout →
+      必然 lan_down → 渲染成"家里网络断了"。云端没有"家里的网络"这个概念，
+      所以只有 local 位置才带（见 main() 的调用点）。
 
     Args:
         path: 目标 JSON 路径；None 表示用内置 DEFAULT_TARGETS。
         scope_filter: 只保留该 scope；None 表示不过滤。
-        include_baseline: 是否追加 intranet 组 + ecosystem 组 + baseline 组。
+        include_baseline: 是否追加 baseline 组（N1/N2）。
+            intranet / ecosystem 组**不受此开关控制**，始终追加。
 
     Returns:
         去重后的 Target 列表。
     """
     if not path:
         raw = list(DEFAULT_TARGETS)
+        # intranet / ecosystem：始终带上（云端用于渲染「云端免测」，手机侧真探测）
+        raw += [d for d in INTRANET_TARGETS if d.get("scope") == SCOPE_INTRANET]
+        raw += [d for d in ECOSYSTEM_TARGETS
+                if d.get("scope") == SCOPE_ECOSYSTEM]
+        # baseline：仅本地位置（云端探它只会产出"家里网络断了"的语义误报）
         if include_baseline:
-            raw += [d for d in INTRANET_TARGETS if d.get("scope") == SCOPE_INTRANET]
-            raw += [d for d in ECOSYSTEM_TARGETS
-                    if d.get("scope") == SCOPE_ECOSYSTEM]
             raw += BASELINE_TARGETS
     else:
         raw = json.load(open(path, encoding="utf-8"))
@@ -1790,11 +1822,17 @@ def main() -> int:
         return _run_merge_mode(args)
 
     try:
-        # include_baseline=True 让云端也带上 intranet 组与基线组：
-        #   - intranet 组会被 _should_skip 跳过，看板显示「云端免测」（R12a 下放）；
-        #   - baseline 组用于 emit 网络健康上下文。
+        # include_baseline 只在 local 位置开启。
+        # 【为什么云端不带 baseline 组（N1/N2）】
+        #   N1 打的是 `http://192.168.1.1/`（家用路由器网关）—— 云端 runner 在
+        #   GitHub 机房，这个地址**必然** timeout，**必然**判 lan_down，于是
+        #   emit 出 `network_state=lan_down`，看板渲染成"家里网络断了"。
+        #   这是**纯粹的语义误报**：云端根本没有"家里的网络"这个概念。
+        #   → 云端 network_state 的唯一合法来源是**本地摘要**（见 network_state
+        #     写入口），云端自己不产生。缺报即 net_unknown。
+        #   intranet 组仍带上（会被 _should_skip 跳过，看板显示「云端免测」，R12a）。
         targets = parse_targets(args.targets, scope_filter=args.scope,
-                                include_baseline=True)
+                                include_baseline=(args.location == LOC_LOCAL))
     except (OSError, json.JSONDecodeError) as e:
         print(f"错误：源文件读取失败：{e}", file=sys.stderr)
         return 2
