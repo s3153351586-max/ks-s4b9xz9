@@ -393,10 +393,16 @@ jobs:
         run: |
           # 产物写到 $RUNNER_TEMP（**不是工作区**），从源头避免被
           # 后续任何 checkout/commit 步骤扫到。
+          # 【R21.1 路径修正】--tracks 传 $RUNNER_TEMP 本身（不带子目录）。
+          #   gx_epg_fetch.py 的 --tracks 语义是"输出目录"，产物落在
+          #   $RUNNER_TEMP/gx_clean_hd.m3u 与 $RUNNER_TEMP/gx_full_305.m3u。
+          #   run#32 死因：之前把一个子目录当参数传入，导致 python 输出
+          #   与下面自检的读取路径错配（run 里 python 成功、自检却找不到文件）。
+          #   现在**全程同一目录 $RUNNER_TEMP**，无子目录，零歧义。
           # --tracks 一次产出 gx_clean_hd.m3u + gx_full_305.m3u（同一快照）。
           # --logo-stats 输出台标命中率 JSON，供下面的自检读取。
           python tools/gx_epg_fetch.py \
-            --tracks "$RUNNER_TEMP/tracks" \
+            --tracks "$RUNNER_TEMP" \
             --logo-stats "$RUNNER_TEMP/logo_stats.json" \
             --verbose
 
@@ -406,7 +412,7 @@ jobs:
           #   ① 双层命中率：硬线 <0.60 => 失败（上游字段突变防线）；
           #      软线 <0.75 => 只告警不失败（第三方抖动不拦发布）。
           #   ② 双轨套件默认**绝不含** catchup 字段（防误开）。
-          python - "$RUNNER_TEMP/tracks" "$RUNNER_TEMP/logo_stats.json" <<'PY'
+          python - "$RUNNER_TEMP" "$RUNNER_TEMP/logo_stats.json" <<'PY'
           import json, os, sys
           tdir, statp = sys.argv[1], sys.argv[2]
           clean = open(os.path.join(tdir, "gx_clean_hd.m3u"), encoding="utf-8").read()
@@ -446,11 +452,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backup-gx-m3u
-          # [R21] 双轨两个文件。**仍然只点名具体文件，绝不上传目录** ——
-          #   上传 `path: .` 或整个 tracks/ 会让中间产物被打包。
+          # [R21.1] 双轨两个文件，路径与上面导出/自检**完全一致**（同一目录）。
+          #   **仍然只点名具体文件，绝不上传目录** ——
+          #   上传 `path: .` 或 `path: ${{ runner.temp }}` 会让中间产物被打包。
           path: |
-            ${{ runner.temp }}/tracks/gx_clean_hd.m3u
-            ${{ runner.temp }}/tracks/gx_full_305.m3u
+            ${{ runner.temp }}/gx_clean_hd.m3u
+            ${{ runner.temp }}/gx_full_305.m3u
             ${{ runner.temp }}/logo_stats.json
           retention-days: 7
           if-no-files-found: error
@@ -499,13 +506,13 @@ jobs:
           #   而不是每次覆盖 —— 覆盖会丢掉"源何时变了"这条线索。
           DEST="$WORK/$(date -u +%Y-%m-%d)"
           mkdir -p "$DEST"
-          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$DEST/"
-          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$DEST/"
+          cp "$RUNNER_TEMP/gx_clean_hd.m3u" "$DEST/"
+          cp "$RUNNER_TEMP/gx_full_305.m3u" "$DEST/"
           cp "$RUNNER_TEMP/logo_stats.json" "$DEST/"
           # 最新一份另放 latest/，方便固定路径直接取用
           mkdir -p "$WORK/latest"
-          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$WORK/latest/"
-          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$WORK/latest/"
+          cp "$RUNNER_TEMP/gx_clean_hd.m3u" "$WORK/latest/"
+          cp "$RUNNER_TEMP/gx_full_305.m3u" "$WORK/latest/"
 
           git -C "$WORK" config user.name  "github-actions[bot]"
           git -C "$WORK" config user.email "github-actions[bot]@users.noreply.github.com"
