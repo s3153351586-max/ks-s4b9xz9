@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 CST = timezone(timedelta(hours=8))  # 中国标准时间，避免云端 UTC 造成日期错位
 STATUS_TTL_HOURS = 24               # 本地摘要超过此时长视为「家里视角缺报」
@@ -325,6 +325,12 @@ P_CLOUD_LATEST = "cloud/latest.json"
 P_CLOUD_HISTORY = "cloud/history/{date}.json"
 P_STATUS_LATEST = "status/latest.json"      # 手机拉取的轻量摘要
 P_INDEX = "index.html"                      # 看板（另由 dashboard 生成）
+# R18：EPG 对比产物（masked，可公开）
+P_EPG_DIFF_LATEST = "epg/diff_latest.json"
+P_EPG_DIFF_HISTORY = "epg/history/diff_{date}.json"
+
+# EPG 对比产物的保留天数（与 cloud/history 同策略，独立配置便于单独调整）
+EPG_HISTORY_KEEP_DAYS = 30
 
 
 def _now() -> datetime:
@@ -477,7 +483,108 @@ def assert_no_leak(payload: Any, label: str = "payload") -> None:
             "请检查 sanitize_report 白名单与 SENSITIVE_KEYS。")
 
 
-# 扫描工作区时跳过的路径：.git 内部对象是压缩的，且本身就是历史，不该重复报警
+# ================================================================ R18 EPG 脱敏
+# 【为什么需要一整套新闸门】
+#   EPG 端点的域名（gxtvepg.taipan.jda.bcs.ottcn.com）**不含任何 LEAK_MARKERS**：
+#   现有三道闸门（deep_strip / assert_no_leak / scan_worktree_for_leaks）**全都拦不住它**。
+#   若不加防护，一旦有人把域名或直链写进 EPG 产物，会**静默进 git 历史**。
+#
+# 【为什么不干脆把 ottcn 加进 LEAK_MARKERS】
+#   因为 `EPG-API-NOTES.md` 是**故意公开**的文档 —— 它就该写这个域名。
+#   加进 LEAK_MARKERS 会让文档扫描直接红，与本项目"公开文档可写形态"的设计冲突。
+#   所以本套闸门**只作用于产物**（payload 级），不参与源码/文档扫描。
+
+# 产物中禁止出现的主机/路径特征串（只用于校验产物，不加入 LEAK_MARKERS）
+EPG_FORBIDDEN_MARKERS = (
+    "ottcn", "taipan", "ysten", "bcs.",          # 新 EPG 端点族特征
+    "gxtvepg", "looktvepg", "jda",               # 具体端点/节点名
+    ".shtml",                                     # 接口路径特征
+)
+
+# 产物中禁止出现的键（出现即视为有人把原始数据塞进来了）
+EPG_FORBIDDEN_KEYS = frozenset({
+    "url", "urls", "cdn_urls", "epg_urls", "healer_urls",
+    "sample_names", "names", "name_by_url", "names_by_url",
+    "channel_names",
+})
+
+# EPG 对比产物的**白名单**键：只保留这些。
+# 与 targets 的 PUBLIC_TARGET_FIELDS 同理 —— 白名单比黑名单安全，
+# 新增字段默认被剥离，而不是"记得排除"。
+EPG_PUBLIC_KEYS = frozenset({
+    "version", "generated_at", "normalization_rule",
+    "epg_stage", "epg_ok", "healer_fetch_ok",
+    "epg_count", "healer_count", "intersect",
+    "epg_only_count", "healer_only_count", "union_count", "jaccard",
+    "placeholder_count", "multi_name_groups", "raw_channel_count",
+    "channel_names_top", "baseline", "drift", "meta",
+})
+
+
+def _walk_keys(obj: Any) -> Iterator[str]:
+    """递归产出所有 dict 的键名（用于禁用键检查）。"""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield str(k)
+            yield from _walk_keys(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _walk_keys(v)
+
+
+def sanitize_epg_diff(diff: Any) -> Dict[str, Any]:
+    """
+    EPG 对比产物的脱敏总入口：**白名单**裁剪 + 现有 deep_strip 兜底。
+
+    Args:
+        diff: 原始 diff 报告（可能来自 epg_diff.build_epg_diff）。
+
+    Returns:
+        可安全发布的 dict；非 dict 输入返回空 dict。
+    """
+    if not isinstance(diff, dict):
+        return {}
+    # 第一层：白名单
+    out = {k: v for k, v in diff.items() if k in EPG_PUBLIC_KEYS}
+    # 第二层：现有黑名单兜底（清 url/cdn_urls 等键 + 特征串）
+    out = deep_strip(out)
+    # channel_names_top 默认应为空 —— 万一上游开了开关，这里强制清掉。
+    # （保守优先：漂移预警不需要频道名，能不给就不给。）
+    if isinstance(out.get("channel_names_top"), list):
+        out["channel_names_top"] = []
+    return out
+
+
+def assert_epg_masked(payload: Any, label: str = "epg diff") -> None:
+    """
+    EPG 产物脱敏自检（**硬闸门**）：命中禁用键或主机特征串即抛异常阻断发布。
+
+    这是 R18 的核心防线 —— 现有 LEAK_MARKERS 对 EPG 域名无效，
+    必须有一道专门针对产区端点的检查。
+
+    Args:
+        payload: 待发布的 EPG 产物。
+        label: 报错定位用名称。
+
+    Raises:
+        RuntimeError: 发现禁用键或主机特征串。
+    """
+    bad_keys = sorted({k for k in _walk_keys(payload) if k in EPG_FORBIDDEN_KEYS})
+    if bad_keys:
+        raise RuntimeError(
+            f"[EPG 脱敏失败] {label} 含禁用键 {bad_keys}，已阻断发布。"
+            "对比产物只应含计数与比率，不含任何 URL/名单。")
+
+    blob = json.dumps(payload, ensure_ascii=False)
+    low = blob.lower()
+    hits = [mk for mk in EPG_FORBIDDEN_MARKERS if mk.lower() in low]
+    if hits:
+        raise RuntimeError(
+            f"[EPG 脱敏失败] {label} 含端点特征串 {hits}，已阻断发布。"
+            "检查 sanitize_epg_diff 白名单是否被绕过。")
+
+
+
 _SCAN_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 _SCAN_TEXT_EXT = {".json", ".html", ".htm", ".js", ".css", ".txt", ".md", ".m3u", ".m3u8"}
 _SCAN_MAX_BYTES = 4 * 1024 * 1024   # 超过 4MB 的文件跳过（避免读大二进制）
@@ -526,7 +633,8 @@ def scan_worktree_for_leaks(root: str) -> List[Any]:
 
 
 def build_status_summary(merged: Optional[Dict[str, Any]],
-                         cloud_report: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+                         cloud_report: Optional[Dict[str, Any]],
+                         epg_diff: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     构造手机侧拉取用的**轻量摘要**（数十字节量级）。
 
@@ -534,12 +642,17 @@ def build_status_summary(merged: Optional[Dict[str, Any]],
       - 矩阵定性数量（all_pass / source_dead / local_channel_blocked ...）
       - 告警 id 列表
       - 网络状态与内网状态
+      - R18：EPG 漂移状态（上游死亡预警）
       - 时间戳
     手机合并时需要的「变化对比」由手机自己的历史完成，云端摘要只提供对照坐标。
+
+    【R18 兼容性】只**加键**不删键 —— 手机侧的解析是宽容的（按需要取键），
+    新增字段不会让它崩，但删键会。
 
     Args:
         merged: 双位置合并结果（可能为 None，如云端未收到本地摘要）。
         cloud_report: 云端单侧报告。
+        epg_diff: R18 可选的 EPG 对比产物（**已脱敏**）。
 
     Returns:
         可直接写入 status/latest.json 的 dict。
@@ -557,6 +670,8 @@ def build_status_summary(merged: Optional[Dict[str, Any]],
         "suppressed": [],
         "network_state": None,
         "intranet_status": None,
+        # R18：EPG 漂移摘要（只放结论与计数，明细在 epg/diff_latest.json）
+        "epg_drift": None,
     }
     if merged:
         s = merged.get("summary") or {}
@@ -569,6 +684,27 @@ def build_status_summary(merged: Optional[Dict[str, Any]],
         # 未收到本地摘要：只给云端视角，手机侧自行补齐本地半格
         net = ((cloud_report.get("summary") or {}).get("network") or {})
         out["network_state"] = net.get("state")
+
+    # R18：EPG 漂移结论。
+    # 【为什么把 R-a/R-b 推进 alarms】它们是"上游可能已死"的实质性告警，
+    #   应走与源告警同一条通知链路（R16 状态机已在上面消费 out["alarms"] 前
+    #   计算过 cur_alarm，所以这里必须在那个位置之前完成 —— 见 publish() 的调用顺序）。
+    if isinstance(epg_diff, dict):
+        drift = epg_diff.get("drift") or {}
+        base = epg_diff.get("baseline") or {}
+        out["epg_drift"] = {
+            "epg_count": epg_diff.get("epg_count"),
+            "healer_count": epg_diff.get("healer_count"),
+            "intersect": epg_diff.get("intersect"),
+            "jaccard": epg_diff.get("jaccard"),
+            "worst": drift.get("worst"),
+            "warmup": base.get("warmup"),
+            "rules": {k: bool(drift.get(k)) for k in ("R-a", "R-b", "R-c", "R-d")},
+        }
+        if drift.get("R-b"):
+            out["alarms"].append("EPG-R-b")
+        if drift.get("R-a"):
+            out["alarms"].append("EPG-R-a")
     return out
 
 
@@ -789,6 +925,40 @@ def ensure_orphan_branch(repo_dir: str, remote: Optional[str],
         _log(f"已创建孤儿分支 {branch}（首建）")
 
 
+def _prune_history_dir(hist_dir: str, keep_days: int,
+                       pattern: str = r"^(?:diff_)?(\d{8})\.json$") -> List[str]:
+    """
+    通用归档清理：删除 hist_dir 下超过 keep_days 的 {date}.json / diff_{date}.json。
+
+    Args:
+        hist_dir: 归档目录。
+        keep_days: 保留天数。
+        pattern: 文件名正则，需含一个 8 位日期捕获组。
+
+    Returns:
+        被删除的文件名列表。
+    """
+    if not os.path.isdir(hist_dir):
+        return []
+    cutoff = (_now().date() - timedelta(days=keep_days))
+    removed: List[str] = []
+    for fn in sorted(os.listdir(hist_dir)):
+        m = re.match(pattern, fn)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                os.remove(os.path.join(hist_dir, fn))
+            except OSError:
+                continue
+            removed.append(fn)
+    return removed
+
+
 def prune_old_history(repo_dir: str, keep_days: int = HISTORY_KEEP_DAYS) -> List[str]:
     """
     删除 cloud/history/ 下超过 keep_days 的归档文件。
@@ -833,7 +1003,8 @@ def publish(report_path: str, repo_dir: str, branch: str = BRANCH_DEFAULT,
             dry_run: bool = False, merged_path: Optional[str] = None,
             dashboard_html: Optional[str] = None, date: Optional[str] = None,
             force_notify: bool = False,
-            emit_notify_marker: Optional[str] = None) -> Dict[str, Any]:
+            emit_notify_marker: Optional[str] = None,
+            epg_diff_path: Optional[str] = None) -> Dict[str, Any]:
     """
     发布云端报告到仓库。
 
@@ -853,13 +1024,16 @@ def publish(report_path: str, repo_dir: str, branch: str = BRANCH_DEFAULT,
             状态机结论写成该路径的 JSON 标记文件。workflow 用这个文件判断
             要不要执行推送步骤 —— 让「判断」留在 Python 里（可测试），
             而不是散落到 YAML 的 shell 条件里。
+        epg_diff_path: R18。可选的 EPG 对比报告路径（`epg_diff.py` 的产物）。
+            **注意：该参数必须放在参数表末尾** —— 调用方（main）是全位置传参，
+            插在中间会让后续参数错位，属静默数据损坏级事故。
 
     Returns:
         {"written": [...], "committed": bool, "pushed": bool, "status": {...},
          "notify": {...}, "notify_state": str}
 
     Raises:
-        RuntimeError: 仓库操作或 push 失败。
+        RuntimeError: 仓库操作或 push 失败；或脱敏自检失败。
     """
     with open(report_path, encoding="utf-8") as f:
         cloud_report = json.load(f)
@@ -879,6 +1053,22 @@ def publish(report_path: str, repo_dir: str, branch: str = BRANCH_DEFAULT,
     else:
         merged_public = None
 
+    # ---- R18：EPG 对比产物脱敏（独立闸门）----
+    # 现有 LEAK_MARKERS 对 EPG 端点域名无效，所以这里走一套专门的白名单 + 特征串检查。
+    # 顺序同报告：先脱敏 → 再自检 → 最后落盘；自检不过抛异常中断发布。
+    epg_raw = None
+    if epg_diff_path and os.path.isfile(epg_diff_path):
+        try:
+            with open(epg_diff_path, encoding="utf-8") as f:
+                epg_raw = json.load(f)
+        except (OSError, ValueError) as e:
+            _log(f"[!] EPG 对比报告读取失败，跳过：{e}")
+            epg_raw = None
+    epg_public = sanitize_epg_diff(epg_raw) if isinstance(epg_raw, dict) else None
+    if epg_public is not None:
+        assert_no_leak(epg_public, "epg diff")
+        assert_epg_masked(epg_public, "epg diff")
+
     day = date or _now().strftime("%Y%m%d")
     written: List[str] = []
 
@@ -893,7 +1083,8 @@ def publish(report_path: str, repo_dir: str, branch: str = BRANCH_DEFAULT,
     counters = load_counters(status_abs)
     counters = bump_counters(counters, cloud_public, merged_public)
 
-    status = build_status_summary(merged_public, cloud_public)
+    status = build_status_summary(merged_public, cloud_public,
+                                  epg_diff=epg_public)
     status["local_freshness"] = freshness
     status["counters"] = counters
     status["run_id"] = counters["run_id"]
@@ -944,16 +1135,40 @@ def publish(report_path: str, repo_dir: str, branch: str = BRANCH_DEFAULT,
     _log(f"通知决策：send={notify['send']} kind={notify['kind']} "
          f"— {notify['note']}（上轮 {prev_notify}）")
 
-    for path, payload, label in (
+    # R18：EPG 对比产物（可能为 None —— 例如 workflow 未提供该步骤）。
+    # 【必须过滤 None】否则 json.dump(None) 会产出内容为 "null" 的文件，
+    # 而且它会**进 git 历史**，让看板与手机侧读到 null 后解析失败。
+    _write_items = [
         (latest_abs, cloud_public, P_CLOUD_LATEST),
         (history_abs, cloud_public, P_CLOUD_HISTORY.format(date=day)),
         (status_abs, status, P_STATUS_LATEST),
-    ):
+    ]
+    if epg_public is not None:
+        _write_items.append((
+            os.path.join(repo_dir, P_EPG_DIFF_LATEST),
+            epg_public, P_EPG_DIFF_LATEST))
+        _write_items.append((
+            os.path.join(repo_dir, P_EPG_DIFF_HISTORY.format(date=day)),
+            epg_public, P_EPG_DIFF_HISTORY.format(date=day)))
+
+    for path, payload, label in _write_items:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         written.append(label)
         _log(f"写入 {label}")
+
+    # R18：清理过期的 EPG 历史（与 cloud/history 同策略，独立保留天数）
+    #   显式传 pattern（而非依赖默认值）：EPG 归档名是 diff_YYYYMMDD.json，
+    #   与 cloud/history 的 YYYYMMDD.json 不同。写清楚可防将来有人把两个
+    #   目录搞混 —— 默认 pattern 是宽松的 `(?:diff_)?`，只靠目录隔离不够稳。
+    _epg_hist_dir = os.path.join(repo_dir, os.path.dirname(
+        P_EPG_DIFF_HISTORY.format(date=day)))
+    _epg_removed = _prune_history_dir(_epg_hist_dir, EPG_HISTORY_KEEP_DAYS,
+                                      pattern=r"^diff_(\d{8})\.json$")
+    if _epg_removed:
+        _log(f"已清理 {len(_epg_removed)} 个过期 EPG 归档"
+             f"（保留 {EPG_HISTORY_KEEP_DAYS} 天）")
 
     # R16：把本轮告警状态落盘，下一轮据此判断「是否翻转」。
     # 只推送给定的状态而不是「有告警就推」，是整个降噪设计的关键一步。
@@ -1041,6 +1256,9 @@ def main() -> int:
                     help="R16：绕过通知状态机无条件推一条（早报模式）")
     ap.add_argument("--emit-notify-marker", default=None, metavar="PATH",
                     help="R16：本轮判定需要推送时，把结论写到该路径（供 workflow 判断）")
+    ap.add_argument("--epg-diff", default=None, metavar="PATH",
+                    help="R18：EPG 对比报告路径（epg_diff.py 产物，masked）。"
+                         "给定时会脱敏后发布到 epg/ 目录；缺省则跳过该产物")
     args = ap.parse_args()
 
     if not os.path.isfile(args.report):
@@ -1061,7 +1279,7 @@ def main() -> int:
         res = publish(args.report, args.repo, args.branch, args.remote,
                       args.push, args.dry_run, args.merged,
                       args.dashboard_html, args.date, args.force_notify,
-                      args.emit_notify_marker)
+                      args.emit_notify_marker, args.epg_diff)
     except RuntimeError as e:
         print(f"[!] 发布失败：{e}", file=sys.stderr)
         return 1
