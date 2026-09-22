@@ -30,11 +30,23 @@
   /* 无 emoji 字体的环境（部分无头/精简系统）下用色块兜底，避免显示成方框 */
   .banner .dot.noemoji{width:14px;height:14px;border-radius:50%;min-width:14px;
                        margin-top:5px;display:inline-block;border:none}
+  /* EPG 块在"正常"态用 .hintline（不是 .banner），需要同样的圆点兜底 */
+  .hintline .dot.noemoji{width:14px;height:14px;border-radius:50%;min-width:14px;
+                        margin-top:5px;display:inline-block;border:none}
   .banner.ok{background:var(--okbg);border-color:#1f5130}
   .banner.warn{background:var(--warnbg);border-color:#5c4a15}
   .banner.bad{background:var(--failbg);border-color:#6e2b2b}
   .banner h3{margin:0 0 4px;font-size:16px}
   .banner p{margin:0;color:var(--dim);font-size:13px}
+  /* R18：上游 vs 官方对比块 */
+  .epg-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
+           gap:10px;margin:0 0 14px}
+  .epg-cell{background:var(--card);border:1px solid var(--line);
+            border-radius:10px;padding:12px 10px;text-align:center}
+  .epg-cell .epg-v{font-size:22px;font-weight:700;line-height:1.2}
+  .epg-cell .epg-l{font-size:11px;color:var(--dim);margin-top:4px}
+  .hintline{background:var(--card);border:1px solid var(--line);border-radius:8px;
+            padding:10px 14px;color:var(--dim);font-size:13px;margin-bottom:14px}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
         gap:12px;margin-bottom:22px}
   .q{background:var(--card);border:1px solid var(--line);border-radius:10px;
@@ -94,6 +106,9 @@
   <h2>目标明细（最近一次云端探测）</h2>
   <div id="targets"></div>
 
+  <h2>上游 vs 官方（EPG 漂移监控）</h2>
+  <div id="epgdrift"></div>
+
   <h2>近 7 日趋势</h2>
   <div class="chart">
     <div id="trend"></div>
@@ -115,7 +130,10 @@
     「家里视角缺报」= 手机侧探针超过 24 小时未上报。这是<strong>灰色提示而非告警</strong>
     ——它只说明家里情况未知，<strong>不影响云端结论的有效性</strong>，
     也不会抑制任何公网告警。此时请开电视人工确认一次。<br>
-    数据每 24 小时由云端自动更新一次。渲染失败时请查看 <code>cloud/latest.json</code>。
+    数据每 24 小时由云端自动更新一次。渲染失败时请查看 <code>cloud/latest.json</code>。<br>
+    「上游 vs 官方」= 第三方列表(Healer) 与运营商官方 EPG 的计数对比，
+    用于<strong>上游死亡预警</strong>：偏离历史基线过大即说明上游可能已删库/大改。
+    该块<strong>只渲染计数与偏离度，不渲染任何频道名或直链</strong>。
   </div>
 </div>
 
@@ -126,6 +144,7 @@
   // 手机回传的 status/latest.json 可选——有则显示家里视角，无则明确标注缺报。
   var LATEST = "cloud/latest.json";
   var STATUS = "status/latest.json";
+  var EPG_DIFF = "epg/diff_latest.json";
   var HISTORY_DAYS = 7;
 
   // 时间戳统一用本地时区展示，避免云端 UTC 造成「今天/昨天」错乱
@@ -183,12 +202,82 @@
 
   Promise.all([
     txt(LATEST).catch(function(){ return null; }),
-    txt(STATUS).catch(function(){ return null; })
+    txt(STATUS).catch(function(){ return null; }),
+    txt(EPG_DIFF).catch(function(){ return null; })
   ]).then(function(res){
-    var cloud = res[0], status = res[1];
+    var cloud = res[0], status = res[1], epg = res[2];
     if(!cloud){ renderError(); return; }
     render(cloud, status);
+    renderEpgDrift(epg);
   }).catch(renderError);
+
+  // ---- R18：上游 vs 官方对比块 ----
+  // 【安全】只渲染计数与偏离度。文件本身已是 masked 产物（无 URL / 无 host），
+  // 这里不做任何"猜测原始值"的渲染，避免把脱敏产物又拼回敏感信息。
+  function renderEpgDrift(epg){
+    var box = document.getElementById("epgdrift");
+    if(!box) return;
+    if(!epg){
+      box.innerHTML = '<div class="hintline">暂无 EPG 对比数据'+
+        '（可能是首次运行，或该步骤未执行）。</div>';
+      return;
+    }
+    var b = epg.baseline || {}, dr = epg.drift || {};
+    var warm = b.warmup === true;
+    var worst = dr.worst || "none";
+    var cls = worst==="critical" ? "banner bad"
+            : worst==="warning"  ? "banner warn"
+            : "hintline";
+    var head = worst==="critical" ? "上游疑似已死（Healer 不可用）"
+             : worst==="warning"  ? "上游偏离历史基线"
+             : "上游与官方计数正常";
+
+    function stat(label, val){
+      return '<div class="epg-cell"><div class="epg-v">'+esc(val)+
+             '</div><div class="epg-l">'+esc(label)+'</div></div>';
+    }
+    // emoji 字体缺失时退化为纯色圆点（沿用 .noemoji 惯例，见上方 banner 渲染）
+    var icon = worst==="none" ? "✅" : "⚠️";
+    var noEmoji2 = !/\p{Extended_Pictographic}/u.test(icon);
+    var dotStyle2 = noEmoji2
+      ? "background:" + (worst==="critical" ? "var(--fail)"
+                        : worst==="warning" ? "var(--warn)" : "var(--ok)") + ";"
+      : "";
+    var html = '<div class="'+cls+'">'+
+      '<div class="dot'+(noEmoji2?" noemoji":"")+'" style="'+dotStyle2+'">'+
+      icon+'</div><div>'+
+      '<h3>'+esc(head)+'</h3>'+
+      '<p>第三方列表 vs 运营商官方 EPG 的计数对比（不含任何频道名与直链）。</p>'+
+      '</div></div>'+
+      '<div class="epg-row">'+
+        stat("官方 EPG", epg.epg_count)+
+        stat("第三方列表", epg.healer_count)+
+        stat("交集", epg.intersect)+
+        stat("Jaccard", epg.jaccard)+
+        stat("官方独有", epg.epg_only_count)+
+        stat("列表独有", epg.healer_only_count)+
+        stat("占位链(已过滤)", epg.placeholder_count)+
+      '</div>';
+    if(warm){
+      html += '<div class="hintline">⏳ 基线预热中（已积累 '+
+        esc(b.samples==null?"0":b.samples)+'/'+esc(b.window_days||7)+
+        ' 天）：此期间只判"上游不可用"硬底线，不做相对偏离告警。</div>';
+    }else{
+      var md = b.medians || {};
+      html += '<div class="hintline">基线：7 天中位数 — 官方 '+
+        esc(md.epg_count)+' / 列表 '+esc(md.healer_count)+
+        ' / Jaccard '+esc(md.jaccard)+'。</div>';
+    }
+    var rules = [];
+    if(dr["R-a"]) rules.push("R-a "+esc(dr["R-a_detail"]||"列表计数骤降"));
+    if(dr["R-b"]) rules.push("R-b "+esc(dr["R-b_detail"]||"上游不可用"));
+    if(dr["R-c"]) rules.push("R-c "+esc(dr["R-c_detail"]||"官方计数偏离"));
+    if(dr["R-d"]) rules.push("R-d "+esc(dr["R-d_detail"]||"结构漂移"));
+    if(rules.length){
+      html += '<div class="hintline">触发规则：'+rules.join("；")+'</div>';
+    }
+    box.innerHTML = html;
+  }
 
   function renderError(){
     document.getElementById("sub").textContent = "数据读取失败";
