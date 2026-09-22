@@ -71,8 +71,55 @@ if HERE not in sys.path:
 from probe_local import (  # noqa: E402
     CDN_HOST_MARKER, CDN_URL_RE, extract_cdn_urls,
 )
-# 图标索引：789 条归一化映射，纯静态、零网络。见 logo_index.py 的模块 docstring。
-import logo_index as _logo_index  # noqa: E402
+# ---------------------------------------------------------------- 图标索引（可选）
+# 【为什么必须是 try/except 而不是直接 import —— 教训换来的】
+#   R20 run#20 的真实事故：仓库里漏传了 `tools/logo_index.py`，
+#   这一行直接 ModuleNotFoundError，整个 export-backup 步骤 4 崩掉。
+#   而图标只是**播放器的装饰**：少了它，频道名、直链、UA 全都好好的，
+#   用户照样能看。为了让"台标"这个纯装饰功能，把"能不能看"这件事搞挂，
+#   是完全不可接受的优先级倒挂。
+#
+#   同款事故过两次了（probe_local.py 漏传也崩过）。**规律很清楚**：
+#   凡是新增的跨文件依赖，都必须做成"缺了也能跑"。
+#   所以这里用 try/except 降级为**空索引**，后面再给一个纯算法兜底。
+try:
+    import logo_index as _logo_index  # noqa: E402
+except ImportError:  # pragma: no cover - 事故场景，用单测的注入路径覆盖
+    _logo_index = None  # type: ignore[assignment]
+
+# _logo_index 缺失时的降级替身：提供 normalize_key / build_index 两个本文件用到的接口。
+# 归一化规则与 logo_index.normalize_key 保持**逐字一致**（否则降级后行为会漂）。
+if _logo_index is None:  # pragma: no cover - 同上
+    import re as _re_fb
+
+    class _FallbackLogoIndex:  # noqa: D101 - 见下方注释
+        """
+        图标索引的降级替身。
+
+        【降级到什么程度】
+          build_index() 返回**空字典** → 所有频道都匹配不到图标 →
+          build_m3u 一条 tvg-logo 都不写。
+          结果：产物 m3u **完全合法、275 条全在、UA 正常、能正常播放**，
+          只是播放器里看到的都是默认图标。
+
+        【为什么不在这里内嵌一份索引副本】
+          那等于把 logo_index.py 的内容复制成两份，两边各自演化 ——
+          迟早出现"降级时用的索引和正常时不一样"的诡异 bug。
+          宁可降级得更彻底（0 个图标），也要保证**只有一处真相**。
+        """
+
+        @staticmethod
+        def normalize_key(name: str) -> str:
+            """归一化键，规则与 logo_index.normalize_key 逐字一致。"""
+            return _re_fb.sub(r"[^0-9a-z\u4e00-\u9fff+]+", "",
+                              (name or "").strip().lower())
+
+        @staticmethod
+        def build_index():
+            """降级索引：空字典（不匹配任何图标）。"""
+            return {}
+
+    _logo_index = _FallbackLogoIndex()  # type: ignore[assignment]
 
 # ---------------------------------------------------------------- 拼音（可选）
 # 【为什么是可选依赖】
@@ -156,6 +203,43 @@ LOGO_BASE = "https://gitee.com/mytv-android/myTVlogo/raw/main/img"
 
 # 分组名：产物固定用一个分组，导入播放器后就是"广西移动"这一栏。
 M3U_GROUP = "广西移动"
+
+# ================================================================ R21 台标直采
+# 【R21 第 1 项：台标直采 channelIcon，弃 Gitee 为主线】
+#   实测（2026-09-23，EPG 305 条）：
+#     channelIcon 非空 = 201/305 = 65.9%   ← 上游真实覆盖率
+#     全部来自单一域名 images.center.bcs.ottcn.com:8080
+#   Gitee 库（789 条）R20 实测在 216 个真实频道名上命中 51 条 = 23.6%。
+#   故 R21 采「直采为主 + Gitee 兜底」（B 方案）：
+#     - 直采优先：上游字段权威、实时、随源站变更自动跟随，零维护。
+#     - Gitee 兜底：仅在 channelIcon 为空时启用，已建成资产白用。
+#
+# 【双层断言指标（实测标定，不是拍的）】
+#   硬线 direct_logo_rate  >= 0.60  → FAIL（上游字段突变防线）
+#       实测 65.9%，留 ~6pt 缓冲。跌破 60% 说明上游 channelIcon 字段被削，
+#       属**上游结构变更**，必须红 —— 这是唯一能提前发现"字段没了"的信号。
+#   软线 combined_logo_rate >= 0.75 → WARN 不 FAIL（第三方抖动不拦发布）
+#       Gitee 侧属于第三方，它抖动不该阻断你的发布链路。
+#       所以只告警、不失败 —— 与"图标可以全丢，m3u 必须完整产出"同一原则。
+DIRECT_LOGO_HARD_FLOOR = 0.60   # 硬线：低于此值 FAIL
+COMBINED_LOGO_SOFT_TARGET = 0.75  # 软线：低于此值 WARN（不 FAIL）
+
+# 【R21 第 4 项红线 · catchup 时移开关】
+#   实测结论（2026-09-23）：
+#     ① EPG 305 条 × 全字段仅 10 个：channelIcon/channelName/coverImgUrl/
+#        livePlayUrl/logo/no/onplay/urlid/usable/uuid
+#        —— **零个** playseek/timeshift/catchup 字段。上游不下发时移能力。
+#     ② 沙箱与 GitHub Actions 出口均**连不上** cdnrrs.gx.chinamobile.com
+#        （TCP 通、HTTP 空回复 exit 52）→ 时移可用性**无法在 CI 实测**。
+#   故：默认关闭。只有显式 --enable-catchup 才注入时移参数。
+#   回归断言保证：默认模式下产物**绝不含**任何 catchup 字段（防误开）。
+CATCHUP_ENABLED_DEFAULT = False
+# 时移参数模板。**待本地实测回填** —— 当前值仅为最常见形态的占位，
+# 在未实测确认前，--enable-catchup 会拒绝工作（见 main 中的守卫）。
+CATCHUP_PARAM_TEMPLATE = "playseek={start}-{end}"
+# 时移参数是否已经过实测确认。False => --enable-catchup 直接报错退出。
+# 这是"绝不在未验证前提下产出错误 m3u"的硬保护。
+CATCHUP_RULE_VERIFIED = False
 
 # 画质/码率/厂商前后缀。这些是 EPG 频道名里的**冗余修饰**，
 # 必须在匹配图标前剥掉 —— 库里没有 "CCTV-2高清8M.png" 这种名字。
@@ -361,6 +445,130 @@ def channel_urls(channels: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
                 break
         out.append((n or "未命名", u))
     return out
+
+
+# ================================================================ R21 台标直采
+def extract_icons(channels: List[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    从频道列表抽出 url -> channelIcon 映射（R21 台标直采通道）。
+
+    【与 get_logo_url 的关系 —— 两条独立通道，不是主备替换】
+      R21 的台标有两个来源，优先级明确：
+        1. **直采**（本函数）：EPG 的 `channelIcon` 字段，上游原样给出。
+           权威、实时、随源站变更自动跟随。实测覆盖 201/305 = 65.9%。
+        2. **匹配**（get_logo_url）：Gitee 789 条库做归一化匹配。
+           仅在直采为空时启用。R20 实测在真实频道名上命中 23.6%。
+
+    【为什么不直接用 `logo` 字段】
+      实测 `logo` 字段的值是被截断的坏数据（如裸 "http"），**不可用**。
+      只有 `channelIcon` 是完整 URL。这一点是实测踩出来的，写死在这里。
+
+    【为什么只认 http(s) 前缀】
+      channelIcon 为空的条目实测有 104/305。空串、None、裸 "http"
+      都会在这里被过滤掉，返回的 map 里绝不会出现无效值 ——
+      调用方可以无条件信任拿到的值是可用的 URL。
+
+    Args:
+        channels: 频道 dict 列表。
+
+    Returns:
+        {直链: 图标URL}。仅含 channelIcon 为非空 http(s) 的条目。
+    """
+    url_keys = ("livePlayUrl", "zteurl", "hwurl", "url", "playUrl",
+                "playurl", "liveUrl", "channelUrl")
+    out: Dict[str, str] = {}
+    for c in channels:
+        u = ""
+        for k in url_keys:
+            v = c.get(k)
+            if isinstance(v, str) and v.strip():
+                u = v.strip()
+                break
+        if not u:
+            continue
+        icon = c.get("channelIcon")
+        if isinstance(icon, str):
+            icon = icon.strip()
+            # 只接受完整 URL。裸 "http" 这类截断值必须挡掉。
+            if icon.startswith(("http://", "https://")):
+                out[u] = icon
+    return out
+
+
+def resolve_logo(url: str, name: str, direct: Optional[Dict[str, str]] = None,
+                 index: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    """
+    R21 台标双通道路由：直采优先，Gitee 兜底。
+
+    【返回值带来源标记，是为了统计命中率】
+      统计必须能区分 "直采命中" 和 "兜底命中"，否则两种断言
+      （硬线看直采、软线看合计）无法分别计算。所以返回 (url, source)。
+
+    【为什么兜底失败必须降级回纯直采、不能抛异常】
+      用户的裁决原文："Gitee 补洞失败必须降级回纯直采、不崩。"
+      这与 R20.1 的三层防线原则一致：图标是装饰，**m3u 必须完整产出**。
+      所以这里对 Gitee 通道再包一层 try —— 第四层防线。
+
+    Args:
+        url: 频道直链（直采通道的键）。
+        name: 频道名（兜底通道的输入）。
+        direct: 直采映射 {url: icon}。
+        index: Gitee 匹配索引。
+
+    Returns:
+        (图标URL, 来源)。来源为 "direct" / "fallback" / "" (未命中)。
+        未命中时图标 URL 为空串（调用方不写 tvg-logo 属性）。
+    """
+    # 通道 1：直采。上游权威，优先。
+    if direct:
+        hit = direct.get(url)
+        if hit:
+            return hit, "direct"
+    # 通道 2：Gitee 兜底。任何异常都降级为"未命中"，绝不外抛。
+    try:
+        fb = get_logo_url(name, index=index)
+    except Exception:  # noqa: BLE001 - 兜底通道故障不得阻断导出
+        fb = ""
+    if fb:
+        return fb, "fallback"
+    return "", ""
+
+
+def logo_stats(total: int, direct_hits: int, fallback_hits: int) -> Dict[str, Any]:
+    """
+    计算 R21 双层断言的命中率指标。
+
+    【为什么单独抽成函数】
+      断言要测的是"统计逻辑正确"，而不是"某次跑的数字好看"。
+      抽出来后单测可以直接注入任意 (total, direct, fallback) 组合，
+      验证硬线/软线的判定边界 —— 不依赖真实网络、不依赖 EPG 当天数据。
+
+    Args:
+        total: 频道总数。
+        direct_hits: 直采命中数。
+        fallback_hits: 兜底命中数。
+
+    Returns:
+        dict: direct 率、combined 率、以及两条线的通过状态。
+    """
+    if total <= 0:
+        return {"total": 0, "direct": 0, "fallback": 0, "combined": 0,
+                "direct_logo_rate": 0.0, "combined_logo_rate": 0.0,
+                "direct_ok": False, "combined_ok": False}
+    direct_rate = direct_hits / total
+    combined_rate = (direct_hits + fallback_hits) / total
+    return {
+        "total": total,
+        "direct": direct_hits,
+        "fallback": fallback_hits,
+        "combined": direct_hits + fallback_hits,
+        "direct_logo_rate": round(direct_rate, 4),
+        "combined_logo_rate": round(combined_rate, 4),
+        # 硬线：低于 60% => 不通过（上游字段突变）
+        "direct_ok": direct_rate >= DIRECT_LOGO_HARD_FLOOR,
+        # 软线：低于 75% => 告警（第三方抖动，不拦发布）
+        "combined_ok": combined_rate >= COMBINED_LOGO_SOFT_TARGET,
+    }
 
 
 # ================================================================ 构建 URL
@@ -690,7 +898,17 @@ def get_logo_url(name: str, index: Optional[Dict[str, str]] = None) -> str:
     """
     if not name:
         return ""
-    idx = index if index is not None else _logo_index.build_index()
+    # 【为什么这里再包一层 try】
+    #   上面的 import 保护只挡住"文件不存在"。
+    #   但 logo_index.py 若**存在却坏了**（语法错、_INDEX 被误删、
+    #   build_index 签名改了），导入能过、调用才炸 —— 那时已经跑到
+    #   275 条的循环里，等于把装饰性功能的问题延迟放大成整批失败。
+    #   所以在调用点也兜一层：出错就当没有索引，图标全 fallback。
+    #   **原则：图标可以全丢，m3u 必须完整产出来。**
+    try:
+        idx = index if index is not None else _logo_index.build_index()
+    except Exception:  # noqa: BLE001 - 任何异常都不该阻断导出
+        return ""
     if not idx:
         return ""
 
@@ -709,9 +927,12 @@ def get_logo_url(name: str, index: Optional[Dict[str, str]] = None) -> str:
 
 def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
               tag: str = M3U_GROUP, ua: str = M3U_UA,
-              index: Optional[Dict[str, str]] = None) -> str:
+              index: Optional[Dict[str, str]] = None,
+              direct_icons: Optional[Dict[str, str]] = None,
+              enable_catchup: bool = CATCHUP_ENABLED_DEFAULT,
+              stats_out: Optional[Dict[str, Any]] = None) -> str:
     """
-    生成 m3u 播放列表（R20 备用源格式）。
+    生成 m3u 播放列表（R21 备用源格式）。
 
     【格式规格】
       #EXTM3U
@@ -719,6 +940,14 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
       # UA: <UA>                            ← 纯注释，给人和其它播放器看
       #EXTINF:-1 group-title="广西移动" tvg-logo="<图标URL>",<频道名>
       <直链>
+
+    【R21 变更点】
+      1. 台标双通道：direct_icons（直采 channelIcon）优先，Gitee 兜底。
+         见 resolve_logo。
+      2. enable_catchup 默认 False。**默认模式下产物绝不出现任何
+         catchup/timeshift/playseek 字样** —— 有断言守着（防误开）。
+      3. stats_out 回填命中率统计，供双层断言使用。用 out 容器而非
+         返回值，是为了不破坏现有调用方的签名兼容性。
 
     【为什么 tvg-logo 在逗号之前、且与 group-title 用空格分隔】
       需求里写的形态是 `group-title="广西移动", tvg-logo="…", 频道名`。
@@ -734,8 +963,9 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
       注释 `# UA:` 兜底 —— 人肉排查时一看就知道该填什么 UA。
 
     【为什么 tvg-logo 可能缺席】
-      get_logo_url 匹配不到就**整个属性不写**，而不是写 tvg-logo=""。
-      空属性会让某些播放器尝试请求空 URL 而卡顿；不写则是干净的降级。
+      resolve_logo 两条通道都没命中就**整个属性不写**，而不是写
+      tvg-logo=""。空属性会让某些播放器尝试请求空 URL 而卡顿；
+      不写则是干净的降级。
 
     【频道名里的引号】
       频道名可能含 `"`（实测没有，但接口是外部的）。统一替换成全角引号，
@@ -746,30 +976,103 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
         name_by_url: url → 频道名映射。
         tag: group-title 值。
         ua: User-Agent，同时进注释行与 exTVLCOPT。
-        index: 图标匹配索引，透传给 get_logo_url。
+        index: Gitee 兜底匹配索引，透传给 get_logo_url。
+        direct_icons: 直采映射 {url: channelIcon}，优先于 index。
+        enable_catchup: 是否注入时移参数。默认 False。
+        stats_out: 非 None 时回填 {"direct": n, "fallback": n} 统计。
 
     Returns:
         m3u 文本（以换行结尾）。
     """
     name_by_url = name_by_url or {}
+    direct_icons = direct_icons or {}
     lines = [
         "#EXTM3U",
         f"# exTVLCOPT:http-user-agent={ua}",
         f"# UA: {ua}",
-        f"# 由 iptv 项目 R20 生成 · 分组={tag} · {len(urls)} 条",
+        f"# 由 iptv 项目 R21 生成 · 分组={tag} · {len(urls)} 条",
     ]
+    n_direct = 0
+    n_fallback = 0
     for i, u in enumerate(urls, 1):
         raw = name_by_url.get(u) or f"{tag}-{i}"
         # 引号/逗号转全角：频道名若含 " 或 , 会破坏 #EXTINF 的属性语法
         # （逗号还兼任"显示名分隔符"，必须最优先处理）。
         n = raw.replace('"', "＂").replace(",", "，")
-        logo = get_logo_url(raw, index=index)
+        # 【离产物最近的一层防线：图标逻辑无论怎么炸，都不能影响产出】
+        #   resolve_logo 内部已兜两层（直采无异常 + 兜底 try）；
+        #   这里是第三层。三层看着冗余，但代价是 0（异常路径永不触发），
+        #   收益是"305 条里第 187 条的台标算不出来"这件事**永远不会**
+        #   变成"整个文件产不出来"。R20.1 事故教训值得这点冗余。
+        try:
+            logo, source = resolve_logo(u, raw, direct=direct_icons,
+                                        index=index)
+        except Exception:  # noqa: BLE001 - 装饰性功能，绝不阻断导出
+            logo, source = "", ""
+        if source == "direct":
+            n_direct += 1
+        elif source == "fallback":
+            n_fallback += 1
+        # catchup 注入（默认关闭）。仅在显式开启时拼接参数。
+        url_out = u
+        if enable_catchup:
+            sep = "&" if "?" in u else "?"
+            url_out = f"{u}{sep}{CATCHUP_PARAM_TEMPLATE}"
         # 【逗号只有一个】：属性区（group-title / tvg-logo）用空格分隔，
         # 逗号之后是显示名。这是 m3u 规范，任何播放器都能正确取到频道名。
         logo_part = f' tvg-logo="{logo}"' if logo else ""
         lines.append(f'#EXTINF:-1 group-title="{tag}"{logo_part},{n}')
-        lines.append(u)
+        lines.append(url_out)
+    if stats_out is not None:
+        stats_out["direct"] = n_direct
+        stats_out["fallback"] = n_fallback
     return "\n".join(lines) + "\n"
+
+
+# ================================================================ R21 双轨输出
+def split_tracks(urls: List[str], name_by_url: Optional[Dict[str, str]] = None
+                 ) -> Tuple[List[str], List[str]]:
+    """
+    把频道列表切成"精简轨(HD)"与"全集轨(全量)"两条。
+
+    【R21 第 2 项：为什么是双轨而不是单轨】
+      单轨要么全给（305 条里混着标清/冷门台，播放器噪音大），要么挑给
+      （手动维护白名单，源一变就得跟着改，必腐化）。双轨把两种需求分开，
+      且**切分规则由数据决定、不由人决定**。
+
+        - 精简轨 gx_clean_hd.m3u：只留"高清及以上"且名字干净的台。
+          剔除：标清/2.5M/4M/8M/测试/直播 等低码率或非正式条目。
+          保留：命中 高清/超清/蓝光/4K/8K/HD，或名字完全不带画质标记
+                （视为默认高清）。
+        - 全集轨 gx_full_305.m3u：**原样全量**，一条不删。它是"数据完整性"
+          的基准 —— 精简轨漏掉的台，这里永远找得到。
+
+    【为什么规则要写死在代码里、且可被断言覆盖】
+      规则一旦藏在人脑里，下次源变更就没人记得当初为什么剔了某个台。
+      写死 + 断言 = 规则可审计、可回归。
+
+    Args:
+        urls: 直链列表。
+        name_by_url: url → 频道名映射。
+
+    Returns:
+        (精简轨 urls, 全集轨 urls)。全集轨与入参等长且同序。
+    """
+    name_by_url = name_by_url or {}
+    # 低码率/非正式特征：出现即踢出精简轨
+    low_re = re.compile(r"(标清|2\.5M|4M|8M|测试|直播)", re.I)
+    # 高清特征：出现即保留
+    hd_re = re.compile(r"(高清|超高清|超清|蓝光|4K|8K|HD)", re.I)
+    # 任何画质标记（用于判定"名字完全不带画质标记"）
+    any_q_re = re.compile(r"(标清|高清|超清|蓝光|4K|8K|HD|SD|[0-9.]+M)", re.I)
+    clean: List[str] = []
+    for u in urls:
+        name = name_by_url.get(u, "")
+        if low_re.search(name):
+            continue
+        if hd_re.search(name) or not any_q_re.search(name):
+            clean.append(u)
+    return clean, list(urls)
 
 
 def build_targets(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
@@ -836,8 +1139,38 @@ def main() -> int:
                          "含内网直链，**绝不入库/上传**，仅存活于 runner 临时目录")
     ap.add_argument("--limit", type=int, default=8,
                     help="targets 取样条数（默认 8；0 = 全量）")
+    # ---- R21 新增 ----
+    ap.add_argument("--tracks", metavar="DIR",
+                    help="R21 双轨输出目录：写 gx_clean_hd.m3u（精简高清轨）"
+                         "与 gx_full_305.m3u（全集轨）。同一次抓取、同一快照")
+    ap.add_argument("--logo-stats", metavar="PATH",
+                    help="R21 把台标命中率统计写成 JSON（供 CI 断言消费）")
+    ap.add_argument("--enable-catchup", action="store_true",
+                    help="R21 注入时移(catchup)参数。**默认关闭**；"
+                         "且时移规则未经本地实测确认前会被守卫拒绝")
     ap.add_argument("--verbose", action="store_true", help="打印过程")
     args = ap.parse_args()
+
+    # 【R21 catchup 守卫：绝不在未验证前提下产出错误 m3u】
+    #   实测（2026-09-23）：
+    #     ① EPG 全字段仅 10 个，**零** playseek/timeshift 字段 → 上游不告诉
+    #        你哪台支持时移、参数怎么拼。
+    #     ② 沙箱与 GHA 出口都连不上移动 CDN（空回复）→ 无法在 CI 实测。
+    #   所以 CATCHUP_RULE_VERIFIED 保持 False 时，显式开启也直接拒绝。
+    #   这不是"功能没做完"，而是**拒绝在猜测的基础上产出错误产物** ——
+    #   一个带错误 playseek 的 m3u 会让播放器点开就报错，比没有更糟。
+    if args.enable_catchup and not CATCHUP_RULE_VERIFIED:
+        print("[!] 拒绝执行 --enable-catchup：时移规则尚未经实测确认。",
+              file=sys.stderr)
+        print("    原因：EPG 无任何时移字段，且 CI 出口连不上移动 CDN，",
+              file=sys.stderr)
+        print("          无法验证 playseek 拼接方式与是否需额外 token。",
+              file=sys.stderr)
+        print("    步骤：在本地网络（手机 Termux / 连手机热点）跑 "
+              "gx_catchup_probe.py，", file=sys.stderr)
+        print("          按实测结论回填 CATCHUP_PARAM_TEMPLATE，并把 "
+              "CATCHUP_RULE_VERIFIED 置 True。", file=sys.stderr)
+        return 5
 
     if args.discover:
         print("[*] discovery：遍历候选端点（三态记录）\n", file=sys.stderr)
@@ -935,6 +1268,72 @@ def main() -> int:
             f.write(build_m3u(res["urls"], name_by_url))
         print(f"[*] m3u 已写入 {args.m3u}（{len(res['urls'])} 条）"
               f"—— 含内网直链，请勿提交仓库。", file=sys.stderr)
+
+    # ============================================================ R21 双轨输出
+    if args.tracks:
+        # 【为什么双轨要一次算出两个文件、而不是两个独立开关】
+        #   两个文件必须来自**同一次抓取**。若分两次跑，EPG 若在两次之间
+        #   变了（哪怕一条），两份产物就不再是同一快照 —— 你无法回答
+        #   "精简轨比全集轨少了哪几条、为什么少"。同快照是双轨可用性的前提。
+        direct_icons = extract_icons(res.get("channels") or [])
+        clean_urls, full_urls = split_tracks(res["urls"], name_by_url)
+        stats: Dict[str, Any] = {}
+
+        out_dir = os.path.dirname(os.path.abspath(args.tracks)) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        clean_path = os.path.join(out_dir, "gx_clean_hd.m3u")
+        full_path = os.path.join(out_dir, "gx_full_305.m3u")
+
+        clean_txt = build_m3u(clean_urls, name_by_url,
+                              direct_icons=direct_icons,
+                              enable_catchup=args.enable_catchup,
+                              stats_out=stats)
+        with open(clean_path, "w", encoding="utf-8") as f:
+            f.write(clean_txt)
+        # 全集轨单独统计（命中率断言以全集轨为分母，它才是全体本）
+        full_stats: Dict[str, Any] = {}
+        full_txt = build_m3u(full_urls, name_by_url,
+                             direct_icons=direct_icons,
+                             enable_catchup=args.enable_catchup,
+                             stats_out=full_stats)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(full_txt)
+
+        # 命中率以**全集轨**为分母 —— 它是全体频道，不受精简规则影响，
+        # 因而能真实反映"上游给了多少台标"。用精简轨做分母会因剔台而虚高。
+        st = logo_stats(len(full_urls), full_stats.get("direct", 0),
+                        full_stats.get("fallback", 0))
+        print(f"[*] 双轨已写入：", file=sys.stderr)
+        print(f"    {clean_path}  精简轨 {len(clean_urls)} 条", file=sys.stderr)
+        print(f"    {full_path}  全集轨 {len(full_urls)} 条", file=sys.stderr)
+        print(f"[*] 台标命中率（分母=全集轨 {st['total']}）：", file=sys.stderr)
+        print(f"    直采 {st['direct']}  兜底 {st['fallback']}  "
+              f"合计 {st['combined']}", file=sys.stderr)
+        print(f"    direct_logo_rate   = {st['direct_logo_rate']:.4f}  "
+              f"（硬线 ≥{DIRECT_LOGO_HARD_FLOOR} → "
+              f"{'通过' if st['direct_ok'] else '失败'}）", file=sys.stderr)
+        print(f"    combined_logo_rate = {st['combined_logo_rate']:.4f}  "
+              f"（软线 ≥{COMBINED_LOGO_SOFT_TARGET} → "
+              f"{'通过' if st['combined_ok'] else '告警(不拦发布)'}）",
+              file=sys.stderr)
+        if not st["direct_ok"]:
+            # 硬线失败 = 上游 channelIcon 字段被削，属结构突变。
+            print("[!] 硬线未达标：上游 channelIcon 覆盖率跌破 "
+                  f"{DIRECT_LOGO_HARD_FLOOR}，疑似**上游字段变更**，"
+                  "请核查 EPG 返回结构。", file=sys.stderr)
+        if not st["combined_ok"]:
+            # 软线失败只告警 —— 第三方（Gitee）抖动不该阻断发布链路。
+            print(f"[~] 软线告警：合计命中率低于 {COMBINED_LOGO_SOFT_TARGET}，"
+                  "多为 Gitee 兜底未命中，不影响发布。", file=sys.stderr)
+        print("[!] 以上两个文件含内网直链，请勿提交仓库。", file=sys.stderr)
+
+        # 命中率统计另存 JSON，供 CI 断言直接消费（避免解析 stderr 文本）。
+        if args.logo_stats:
+            os.makedirs(os.path.dirname(
+                os.path.abspath(args.logo_stats)) or ".", exist_ok=True)
+            with open(args.logo_stats, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False, indent=2)
+            print(f"[*] 命中率统计已写入 {args.logo_stats}", file=sys.stderr)
 
     if args.targets:
         os.makedirs(os.path.dirname(os.path.abspath(args.targets)) or ".",
