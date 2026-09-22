@@ -1,17 +1,17 @@
 {
   "version": "r18",
-  "generated_at": "2026-09-23T03:58:01.517952+08:00",
+  "generated_at": "2026-09-23T04:13:54.484044+08:00",
   "normalization_rule": "strip-query+strip-trailing-slash",
   "epg_stage": "ok",
   "epg_ok": true,
   "healer_fetch_ok": true,
   "epg_count": 275,
-  "healer_count": 148,
-  "intersect": 119,
-  "epg_only_count": 156,
+  "healer_count": 147,
+  "intersect": 118,
+  "epg_only_count": 157,
   "healer_only_count": 29,
   "union_count": 304,
-  "jaccard": 0.3914,
+  "jaccard": 0.3882,
   "placeholder_count": 1,
   "multi_name_groups": 4,
   "raw_channel_count": 305,
@@ -38,7 +38,7 @@
     "worst": "none"
   },
   "meta": {
-    "healer_fetch_note": "OK 42921B",
-    "note": "Healer m3u 抽到 148 条直链"
+    "healer_fetch_note": "OK 42638B",
+    "note": "Healer m3u 抽到 147 条直链"
   }
 }
