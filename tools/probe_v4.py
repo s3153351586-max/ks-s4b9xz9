@@ -112,15 +112,40 @@ DEFAULT_TARGETS: List[Dict[str, Any]] = [
 # 内网组（scope=intranet）：**云端只登记、不探测**（_should_skip 会跳过）。
 # 保留在此是为了让云端看板能显示「云端免测」行，而不是静默消失 —— 缺行会让人
 # 误以为漏配，显式 skip 才是诚实的。
-#   B1   主直链        —— 手机侧动态抽取（gx.m3u 第 1 条 cdnrrs）
-#   B1b  同域另一频道   —— 手机侧动态抽取（gx.m3u 第 2 条 cdnrrs）
-#   B2i  移动 EPG 域    —— HEAD 探针，区分「网络层断」vs「业务层断」
+#   B1   主直链        —— 手机侧动态抽取（EPG 优先 / gx.m3u 回退）
+#   B1b  同域另一频道   —— 手机侧动态抽取（同上）
 #
 # 这里的 url 是**占位**，云端永不请求，仅用于看板展示来源域名。真值在手机侧。
 INTRANET_TARGETS: List[Dict[str, Any]] = [
     {"id": "B1", "name": "移动CDN主链（手机侧动态）", "url": "http://cdnrrs.gx.chinamobile.com/", "type": "stream", "scope": "intranet"},
     {"id": "B1b", "name": "移动CDN副链（手机侧动态）", "url": "http://cdnrrs.gx.chinamobile.com/", "type": "stream", "scope": "intranet"},
-    {"id": "B2i", "name": "移动EPG域(网络层探针)", "url": "http://epg.gx.chinamobile.com/", "type": "head", "scope": "intranet"},
+]
+
+# 生态组（scope=ecosystem）：运营商公网生态域，作为**诊断上下文**。
+#
+# 【R18 换靶】B2i 原本指向 `epg.gx.chinamobile.com` —— 该域名**实测 NXDOMAIN**，
+#   是历史遗留的废假设（它从未解析成功过，所以这个探针一直在"永久失败"）。
+#   换成本轮实测可用的官方 EPG 端点。
+#
+# 【R18 语义变更 —— 重要】
+#   旧注释说："B2i 可达 ⇒ 移动内网可达"。**新语义下这不再成立**：
+#   新靶是**公网**域，它可达只能证明"移动生态域公网可达"，
+#   **不能**推出"IPTV 内网可达"。因此判定链的结论文案必须同步改（见 assess_intranet）。
+#
+# 【为什么云端也跳过（而不是让云端测）】
+#   云端已经在跑 `gx_epg_fetch.py`（Actions 日更步骤）—— 那次请求的成败
+#   就是云端侧"EPG 健康"的信号。这里再探一次是**重复探测**，
+#   只会引入"两个地方对同一个域给出不同结论"的困惑。
+ECOSYSTEM_TARGETS: List[Dict[str, Any]] = [
+    {
+        "id": "B2i",
+        "name": "移动生态域(公网EPG)",
+        "url": ("http://gxtvepg.taipan.jda.bcs.ottcn.com:8080"
+                "/ysten-lvoms-epg/epg/getChannels.shtml"
+                "?deviceGroupId=4747&districtCode=450000"),
+        "type": "head",
+        "scope": "ecosystem",
+    },
 ]
 
 BASELINE_TARGETS: List[Dict[str, Any]] = [
@@ -132,10 +157,18 @@ BASELINE_TARGETS: List[Dict[str, Any]] = [
 SCOPE_PUBLIC = "public"
 SCOPE_INTRANET = "intranet"
 SCOPE_BASELINE = "baseline"
-VALID_SCOPES = (SCOPE_PUBLIC, SCOPE_INTRANET, SCOPE_BASELINE)
+# R18 新增：ecosystem —— 运营商的**公网**生态域（EPG 元数据接口）。
+#   与 intranet 的区别：它公网可解析可达，不受"必须接 IPTV 网段"约束；
+#   与 public 的区别：它是运营商自有基础设施，语义上属于"生态"而非"公网源"，
+#   且**不参与源告警**（它挂了意味着"生态域不可达"，不是"某个源死了"）。
+SCOPE_ECOSYSTEM = "ecosystem"
+VALID_SCOPES = (SCOPE_PUBLIC, SCOPE_INTRANET, SCOPE_BASELINE, SCOPE_ECOSYSTEM)
 
-# 不参与源告警的 scope（baseline 只做网络健康判定）
-ALERT_EXEMPT_SCOPES = (SCOPE_BASELINE,)
+# 不参与源告警的 scope
+#   baseline  —— 只做网络健康判定
+#   ecosystem —— 只做"生态域可达性"判定，是**诊断上下文**而非被监控的源。
+#                它进告警会产生"EPG 域抖了一下 → 报某频道源挂了"的误导。
+ALERT_EXEMPT_SCOPES = (SCOPE_BASELINE, SCOPE_ECOSYSTEM)
 
 # 目标类型：list（m3u 列表）/ stream（直播流）/ head（仅探可达性，不测速）
 VALID_KINDS = ("list", "stream", "head")
@@ -335,8 +368,18 @@ class IPTVProbe:
         self._host_sems: Dict[str, asyncio.Semaphore] = {}
 
     def _should_skip(self, t: Target) -> bool:
-        """云端不应探测内网源（位置不可达，测了也是假阴性）。"""
-        return self.location == LOC_CLOUD and t.scope == SCOPE_INTRANET
+        """
+        云端不探测的源。
+
+        两类：
+          intranet  —— 位置不可达，测了也是假阴性（本就只在手机侧测）；
+          ecosystem —— **不是位置问题**，是**职责划分**：云端已在 Actions 里
+                       跑 gx_epg_fetch，那次的成败即 EPG 健康信号。
+                       这里再探一遍属重复探测，且会造成两处结论打架。
+        """
+        if self.location != LOC_CLOUD:
+            return False
+        return t.scope in (SCOPE_INTRANET, SCOPE_ECOSYSTEM)
 
     # ------------------------------------------------------------ 工具
     @staticmethod
@@ -1169,16 +1212,23 @@ def merge_reports(cloud_path: Optional[str], local_path: Optional[str]) -> Dict[
         if row["level"] == "level2":
             level2.append(tid)
 
+    _lt_results = ([Result(**{k: v for k, v in t.items()
+                              if k in Result.__dataclass_fields__})
+                    for t in (local_rep or {}).get("targets", [])]
+                   if local_rep else [])
+    _lt_net_state = local_net.get("state")
+    _lt_net_ok: Optional[bool] = (
+        True if _lt_net_state == NET_OK
+        else False if _lt_net_state in (NET_LAN_DOWN, NET_WAN_DOWN)
+        else None)
+
     return {
         "version": "v4.2",
         "timestamp": datetime.now().isoformat(),
         "matrices": rows,
         "network": local_net,
-        "intranet": (assess_intranet(
-            [Result(**{k: v for k, v in t.items()
-                       if k in Result.__dataclass_fields__})
-             for t in (local_rep or {}).get("targets", [])])
-            if local_rep else {}),
+        "intranet": (assess_intranet(_lt_results, network_ok=_lt_net_ok)
+                     if local_rep else {}),
         "summary": {
             "total": len(rows),
             "verdicts": verdict_count,
@@ -1361,13 +1411,35 @@ def assess_network(results: List[Result]) -> Dict[str, Any]:
             "detail": "部分基线缺失，按不抑制处理"}
 
 
-def assess_intranet(results: List[Result]) -> Dict[str, Any]:
+def assess_intranet(results: List[Result],
+                    network_ok: Optional[bool] = None) -> Dict[str, Any]:
     """
-    intranet 组冗余判定（R10）：区分「单节点故障」「整域故障」「网络层 vs 业务层」。
+    内网 + 生态域判定（R10 → R18 语义重命名）：区分「单节点」「CDN 层」「生态层」故障。
 
-      B1 fail, B1b ok   → single_node  单节点故障，切 B1b
-      B1 fail, B1b fail, B2i ok  → domain_down 该 CDN 域故障但移动内网可达 → 切备用域
-      B1 fail, B1b fail, B2i fail → intranet_down 移动内网整体不可达
+    R18 变更：B2i 的靶从**内网 EPG 域**换成**公网生态域**，因此"B2i 可达"
+    的证明力变了 —— 旧注释说它证明"移动内网可达"，**新语义下它只证明
+    "运营商生态域公网可达"**。所以状态名与文案同步重命名，让"结论即指路"。
+
+    判定链（N = 网络基线，可选传入用于 eco_all_down）：
+
+      B1 ok                                  → intranet_ok    源正常
+      B1 fail, B1b ok                        → single_node    单节点故障，切 B1b
+      B1/B1b fail, B2i ok                    → cdn_down       CDN 流死但生态域可达
+                                                              → 查 UA/Referer（三/四级战备）
+      B1/B1b fail, B2i fail, N ok            → eco_down       生态域不可达
+                                                              → 查 DNS/路由（二级战备）
+      B1/B1b fail, B2i fail, N fail          → eco_all_down   连网络基线都挂
+                                                              → 一级战备 + 报障运营商
+
+    兼容别名：`domain_down` 对应 cdn_down、`intranet_down` 对应 eco_down/eco_all_down，
+    保留一版以免看板/手机侧的旧解析崩掉（见 label 文案已换新语义）。
+
+    Args:
+        results: 全部探测结果（含 ecosystem 组的 B2i —— 由调用方保证传入全量）。
+        network_ok: 网络基线（N1/N2）是否健康；None 表示未知。
+
+    Returns:
+        含 status / label / detail 的 dict。
     """
     by_id = {r.id: r for r in results}
     b1, b1b, b2i = by_id.get("B1"), by_id.get("B1b"), by_id.get("B2i")
@@ -1376,6 +1448,8 @@ def assess_intranet(results: List[Result]) -> Dict[str, Any]:
 
     b1_ok = bool(b1 and b1.ok)
     b1b_ok = bool(b1b and b1b.ok)
+    # B2i 可能不在本组结果里（云端会 skip 它）。None 表示"未测"，
+    # 与"测了但失败"（False）必须区分 —— 否则云端会把"没测"误报成"生态域挂了"。
     b2i_ok = bool(b2i and b2i.ok) if b2i is not None else None
 
     if b1_ok and (b1b is None or b1b_ok):
@@ -1385,11 +1459,23 @@ def assess_intranet(results: List[Result]) -> Dict[str, Any]:
                 "detail": "同域另一频道可达 → 切 B1b 副链，非全域故障"}
     if not b1_ok and b1b is not None and not b1b_ok:
         if b2i_ok:
-            return {"status": "domain_down", "label": "CDN 域故障（EPG 可达）",
-                    "detail": "B1/B1b 全挂但 EPG 域可达 → 网络层正常、业务层故障，切备用域"}
+            return {"status": "cdn_down",
+                    "label": "CDN 层故障（生态域可达）",
+                    "detail": "B1/B1b 全挂但生态域可达 → 网络层通、CDN 业务层故障；"
+                              "查 UA/Referer 或切备用域（三/四级战备）",
+                    "alias": "domain_down"}
         if b2i_ok is False:
-            return {"status": "intranet_down", "label": "移动内网整体不可达",
-                    "detail": "连 EPG 域都不可达 → 移动内网链路问题，非源问题"}
+            if network_ok is False:
+                return {"status": "eco_all_down",
+                        "label": "移动生态整体不可达（含网络基线）",
+                        "detail": "B2i/B1/B1b 全挂且网络基线也失败 → "
+                                  "一级战备：核查本机网络并报障运营商",
+                        "alias": "intranet_down"}
+            return {"status": "eco_down",
+                    "label": "移动生态域不可达",
+                    "detail": "连运营商公网生态域都不可达（网络基线尚可）→ "
+                              "疑似 DNS/路由/污染，二级战备：换 DNS 或切通道",
+                    "alias": "intranet_down"}
     return {"status": "partial", "label": "内网状态不完整", "detail": ""}
 
 
@@ -1428,9 +1514,18 @@ def build_report(results: List[Result], meta: Optional[Dict[str, Any]] = None) -
             "total_stream": sum(1 for r in grp if r.kind == "stream"),
         }
 
-    # R10: 网络健康 + 内网冗余判定
+    # R10→R18: 网络健康 + 内网/生态冗余判定
     net = assess_network(results)
-    intra = assess_intranet(results)
+    # 把网络基线的结论喂给内网判定 —— 用来区分 eco_down（网络还行、生态域挂）
+    # 与 eco_all_down（连网络基线都挂）。少了这个参数，两者会被混为一谈。
+    net_state = net.get("state")
+    if net_state == NET_OK:
+        net_ok: Optional[bool] = True
+    elif net_state in (NET_LAN_DOWN, NET_WAN_DOWN):
+        net_ok = False
+    else:
+        net_ok = None      # 基线数据缺失 → 未知，不强行归类
+    intra = assess_intranet(results, network_ok=net_ok)
 
     rep: Dict[str, Any] = {
         "version": "v4.2",
@@ -1598,7 +1693,7 @@ def parse_targets(path: Optional[str], scope_filter: Optional[str] = None,
     Args:
         path: 目标 JSON 路径；None 表示用内置 DEFAULT_TARGETS。
         scope_filter: 只保留该 scope；None 表示不过滤。
-        include_baseline: 是否追加 intranet 组 + baseline 组。
+        include_baseline: 是否追加 intranet 组 + ecosystem 组 + baseline 组。
 
     Returns:
         去重后的 Target 列表。
@@ -1607,6 +1702,8 @@ def parse_targets(path: Optional[str], scope_filter: Optional[str] = None,
         raw = list(DEFAULT_TARGETS)
         if include_baseline:
             raw += [d for d in INTRANET_TARGETS if d.get("scope") == SCOPE_INTRANET]
+            raw += [d for d in ECOSYSTEM_TARGETS
+                    if d.get("scope") == SCOPE_ECOSYSTEM]
             raw += BASELINE_TARGETS
     else:
         raw = json.load(open(path, encoding="utf-8"))
