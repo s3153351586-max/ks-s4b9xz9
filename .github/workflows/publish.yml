@@ -347,4 +347,191 @@ jobs:
   #
   #   ❗【当前实际状态】私推步骤是 `if: false`（**硬关，不是"等 PAT"**）。
   #     原因：引入 90 天长期 PAT 与本项目"零长期凭据"的既定架构冲突，
-  #     且 artifact 手动下载对"战时备用"定位已足够。属搁置
+  #     且 artifact 手动下载对"战时备用"定位已足够。属搁置的 DLC。
+  #     将来启用由 agent 用 job 级 env 注入方案重开（见文件头）。
+  #
+  # 【触发条件为什么写成这样】
+  #   github.event_name == 'workflow_dispatch'  —— schedule 触发时
+  #     github.event.inputs 不存在，这个条件直接为假，定时任务绝不会
+  #     顺手生成含直链的 artifact。
+  #   github.event.inputs.export_backup == 'true'  —— boolean input 在
+  #     event.inputs 里是**字符串** 'true'/'false'（不是布尔），
+  #     写成 `== true` 会永远不成立。这个坑实测踩过。
+  export-backup:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.export_backup == 'true'
+    runs-on: ubuntu-latest
+    # 超时给足：EPG 取数 + 双轨写入 + 私有推送，正常 1-2 分钟内完成，
+    # 但接口慢时要留余量（这是手动触发的兜底任务，宁可慢也别失败）。
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout 代码（main 分支，**不碰** gh-pages）
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 【为什么要单独装 pypinyin】
+          #   R21 后台标主线是直采 channelIcon；Gitee 兜底通道的拼音候选
+          #   （"安徽卫视" → ANHUI）仍依赖 pypinyin。
+          #   它是**可选**依赖：缺失时兜底降级（少些图标）但绝不失败。
+          pip install -r requirements.txt
+          pip install pypinyin==0.55.0
+
+      - name: 导出双轨备用源 m3u
+        run: |
+          # 产物写到 $RUNNER_TEMP（**不是工作区**），从源头避免被
+          # 后续任何 checkout/commit 步骤扫到。
+          # --tracks 一次产出 gx_clean_hd.m3u + gx_full_305.m3u（同一快照）。
+          # --logo-stats 输出台标命中率 JSON，供下面的自检读取。
+          python tools/gx_epg_fetch.py \
+            --tracks "$RUNNER_TEMP/tracks" \
+            --logo-stats "$RUNNER_TEMP/logo_stats.json" \
+            --verbose
+
+          # 【自检】空列表或格式不对就直接失败，别让用户下到坏文件。
+          # 这是"产物质量闸门"：宁可 Job 标红，也不交付打不开的 m3u。
+          # 【R21 新增两条】
+          #   ① 双层命中率：硬线 <0.60 => 失败（上游字段突变防线）；
+          #      软线 <0.75 => 只告警不失败（第三方抖动不拦发布）。
+          #   ② 双轨套件默认**绝不含** catchup 字段（防误开）。
+          python - "$RUNNER_TEMP/tracks" "$RUNNER_TEMP/logo_stats.json" <<'PY'
+          import json, os, sys
+          tdir, statp = sys.argv[1], sys.argv[2]
+          clean = open(os.path.join(tdir, "gx_clean_hd.m3u"), encoding="utf-8").read()
+          full = open(os.path.join(tdir, "gx_full_305.m3u"), encoding="utf-8").read()
+
+          for name, txt in (("gx_clean_hd", clean), ("gx_full_305", full)):
+              lines = txt.splitlines()
+              assert lines and lines[0] == "#EXTM3U", f"{name} 缺 #EXTM3U 头"
+              assert "dalvik/2.1.0" in txt.lower(), f"{name} 缺 UA 头"
+              n = sum(1 for l in lines if l.startswith("#EXTINF"))
+              assert n >= 1, f"{name} 没有任何频道"
+              assert "servicetype=1" in txt, f"{name} 直链形态不对"
+              # R21 防误开：默认模式绝不出现 catchup/playseek 字样
+              low = txt.lower()
+              assert "playseek" not in low and "catchup" not in low, \
+                  f"{name} 默认模式却含 catchup 字段（开关被误开？）"
+              print(f"[OK] {name}: {n} 条")
+
+          st = json.load(open(statp, encoding="utf-8"))
+          print(f"[i] 台标 direct={st['direct']} fallback={st['fallback']} "
+                f"total={st['total']}")
+          print(f"[i] direct_logo_rate={st['direct_logo_rate']} "
+                f"combined_logo_rate={st['combined_logo_rate']}")
+          # 硬线：失败即 Job 红（守住上游 channelIcon 字段突变）
+          assert st["direct_ok"], (
+              f"硬线未达标：direct_logo_rate={st['direct_logo_rate']} < 0.60，"
+              "疑似上游 channelIcon 字段被削，请核查 EPG 返回结构")
+          # 软线：只告警，绝不阻断发布
+          if not st["combined_ok"]:
+              print(f"[!] 软线告警：combined_logo_rate="
+                    f"{st['combined_logo_rate']} < 0.75（不拦发布）")
+          print("[OK] 双轨产物自检通过")
+          PY
+
+      - name: 上传备用源（artifact —— 7 天自动删，不进仓库）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-gx-m3u
+          # [R21] 双轨两个文件。**仍然只点名具体文件，绝不上传目录** ——
+          #   上传 `path: .` 或整个 tracks/ 会让中间产物被打包。
+          path: |
+            ${{ runner.temp }}/tracks/gx_clean_hd.m3u
+            ${{ runner.temp }}/tracks/gx_full_305.m3u
+            ${{ runner.temp }}/logo_stats.json
+          retention-days: 7
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # R21：推送到私有库 iptv-private（免手动下载）
+      # -----------------------------------------------------------------------
+      # 【安全边界 —— 逐步说明】
+      #   1. 目标仓库是**另一个**仓库（iptv-private），不是本仓库。
+      #      **不碰本仓库任何分支，尤其不碰 gh-pages。**
+      #   2. 凭据用 Secrets 里的 PRIVATE_PAT（fine-grained，仅读写在
+      #      iptv-private）。代码里零字面量 token。
+      #   3. token 通过 URL 传给 git 的做法会把它写进 .git/config，
+      #      这里用 `git remote set-url` 在 push 前设置、push 后立刻清除，
+      #      且**只推一个 commit**（--depth 1），把暴露窗口压到最小。
+      #   4. 未配 PAT => 本步骤被 if 跳过 => 退回 artifact 手动下载。
+      #      **双路径并存、默认安全。**
+      #
+      # 【R21 修订：if 里不再出现 secrets —— 见文件头说明】
+      #   原来写的是 `if: ${{ secrets.PRIVATE_PAT != '' }}`。
+      #   语义没问题，但 `secrets.*` 在 `if:` 里会让网页编辑器标红，
+      #   手机端改动易出错。现在**直接 `if: false`**（永不执行），
+      #   `if:` 块零 secrets、零标红。
+      #   将来要启用：由 agent 用 job 级 env 注入方案重开（见文件头）。
+      - name: 推送到私有库 iptv-private（已关闭：if false）
+        if: false
+        continue-on-error: true
+        env:
+          # 私有库名字，想换库只改这一处。
+          PRIVATE_REPO: iptv-private
+          PRIVATE_PAT: ${{ secrets.PRIVATE_PAT }}
+        run: |
+          set -euo pipefail
+          TARGET="https://x-access-token:${PRIVATE_PAT}@github.com/${{ github.repository_owner }}/${PRIVATE_REPO}.git"
+          WORK="$RUNNER_TEMP/private-push"
+          rm -rf "$WORK"; mkdir -p "$WORK"
+
+          # 先试 clone；空库/新库 clone 会失败，那就 init 一个。
+          if ! git clone --depth 1 "$TARGET" "$WORK" 2>/dev/null; then
+            echo "[i] 私有库为空或不存在，初始化为新仓库"
+            git -C "$WORK" init -q
+            git -C "$WORK" remote add origin "$TARGET"
+          fi
+
+          # 【为什么要分目录】产物按日期归档，方便你回溯"某天的源长什么样"，
+          #   而不是每次覆盖 —— 覆盖会丢掉"源何时变了"这条线索。
+          DEST="$WORK/$(date -u +%Y-%m-%d)"
+          mkdir -p "$DEST"
+          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$DEST/"
+          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$DEST/"
+          cp "$RUNNER_TEMP/logo_stats.json" "$DEST/"
+          # 最新一份另放 latest/，方便固定路径直接取用
+          mkdir -p "$WORK/latest"
+          cp "$RUNNER_TEMP/tracks/gx_clean_hd.m3u" "$WORK/latest/"
+          cp "$RUNNER_TEMP/tracks/gx_full_305.m3u" "$WORK/latest/"
+
+          git -C "$WORK" config user.name  "github-actions[bot]"
+          git -C "$WORK" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$WORK" add -A
+          if git -C "$WORK" diff --cached --quiet; then
+            echo "[i] 内容无变化，跳过提交"
+          else
+            git -C "$WORK" commit -q -m "chore: 更新双轨备用源 $(date -u +%Y-%m-%d)"
+            git -C "$WORK" push -q origin HEAD:main || \
+              git -C "$WORK" push -q origin HEAD:master
+            echo "[OK] 已推送到 ${PRIVATE_REPO}"
+          fi
+          # 【立刻清除凭据】避免残留在 .git/config 里
+          git -C "$WORK" remote set-url origin \
+            "https://github.com/${{ github.repository_owner }}/${PRIVATE_REPO}.git"
+
+      # 未配 PAT 时的显式提示（让人知道产物在哪、怎么配便捷通道）
+      # 【R21 修订：if 里不再出现 secrets —— 见文件头说明】
+      #   原来写的是 `if: ${{ secrets.PRIVATE_PAT == '' }}`（未配 PAT 时提示）。
+      #   现在**直接 `if: false`** —— 关掉私推后这条提示也无意义了
+      #   （没开私推，自然不需要提示怎么配）。
+      #   将来启用私推时，这条提示由 agent 用 env 方案一并重开（见文件头）。
+      - name: 私有推送未启用时的说明（已关闭：if false）
+        if: false
+        run: |
+          echo "[i] 未配置 PRIVATE_PAT —— 已跳过私有库推送。"
+          echo "    产物仍可在本 run 的 Artifacts 里下载（7 天内有效）。"
+          echo "    想启用免手动下载：新建私有库 iptv-private，"
+          echo "    并添加 Secrets.PRIVATE_PAT（fine-grained，仅该库 Contents 读写，90 天轮换）。"
