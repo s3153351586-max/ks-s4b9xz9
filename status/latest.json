@@ -1,7 +1,7 @@
 {
   "version": "v4.2",
-  "published_at": "2026-09-22T08:12:13.452556+08:00",
-  "cloud_timestamp": "2026-09-22T00:12:13.359787",
+  "published_at": "2026-09-22T18:31:03.749142+08:00",
+  "cloud_timestamp": "2026-09-22T10:31:03.458389",
   "cloud_ok_stream": 1,
   "cloud_total_stream": 1,
   "cloud_ok_list": 3,
@@ -11,6 +11,7 @@
   "suppressed": [],
   "network_state": "lan_down",
   "intranet_status": null,
+  "epg_drift": null,
   "local_freshness": {
     "stale": true,
     "last_seen": null,
@@ -24,7 +25,7 @@
     "alarms_total": 0,
     "suppressed_total": 0,
     "pending_total": 0,
-    "first_run_at": "2026-09-22T08:12:13.452549+08:00",
+    "first_run_at": "2026-09-22T18:31:03.749131+08:00",
     "push_successes": 0,
     "push_failures": 0,
     "push_last_error": null

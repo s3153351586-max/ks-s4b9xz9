@@ -1,6 +1,6 @@
 {
   "version": "v4.2",
-  "timestamp": "2026-09-22T00:12:13.359787",
+  "timestamp": "2026-09-22T10:31:03.458389",
   "probe_location": "cloud",
   "summary": {
     "total": 11,
@@ -40,6 +40,15 @@
         "total_list": 0,
         "ok_stream": 0,
         "total_stream": 0
+      },
+      "ecosystem": {
+        "total": 0,
+        "ok": 0,
+        "fail": 0,
+        "ok_list": 0,
+        "total_list": 0,
+        "ok_stream": 0,
+        "total_stream": 0
       }
     },
     "network": {
@@ -53,9 +62,10 @@
       "detail": "N1 默认网关不可达（timeout）——此时所有源失败都可能是本地网络导致，已抑制源告警"
     },
     "intranet": {
-      "status": "intranet_down",
-      "label": "移动内网整体不可达",
-      "detail": "连 EPG 域都不可达 → 移动内网链路问题，非源问题"
+      "status": "eco_all_down",
+      "label": "移动生态整体不可达（含网络基线）",
+      "detail": "B2i/B1/B1b 全挂且网络基线也失败 → 一级战备：核查本机网络并报障运营商",
+      "alias": "intranet_down"
     },
     "changes": {
       "recovered": [],
@@ -71,7 +81,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 241,
+      "latency_ms": 86,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -85,7 +95,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 250,
+      "latency_ms": 205,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -99,7 +109,7 @@
       "scope": "public",
       "status": null,
       "ok": false,
-      "latency_ms": 1262,
+      "latency_ms": 1254,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -113,7 +123,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 62,
+      "latency_ms": 329,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -127,7 +137,7 @@
       "scope": "public",
       "status": 403,
       "ok": false,
-      "latency_ms": 1552,
+      "latency_ms": 3242,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -170,17 +180,17 @@
       "status": 200,
       "ok": true,
       "latency_ms": null,
-      "ttfb_ms": 131,
-      "speed_kbps": 16811.5,
+      "ttfb_ms": 110,
+      "speed_kbps": 36365.4,
       "change": null,
       "error": null,
-      "hint": "该地址含521个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
+      "hint": "该地址含505个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
     },
     {
       "id": "B2i",
-      "name": "移动EPG域(网络层探针)",
+      "name": "移动生态域(公网EPG)",
       "kind": "head",
-      "scope": "intranet",
+      "scope": "ecosystem",
       "status": null,
       "ok": false,
       "latency_ms": null,
@@ -212,7 +222,7 @@
       "status": 404,
       "ok": true,
       "latency_ms": null,
-      "ttfb_ms": 306,
+      "ttfb_ms": 421,
       "speed_kbps": null,
       "change": null,
       "error": null,
