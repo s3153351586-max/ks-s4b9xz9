@@ -201,7 +201,10 @@ M3U_UA = ("Dalvik/2.1.0 (Linux; U; Android 14; "
 
 LOGO_BASE = "https://gitee.com/mytv-android/myTVlogo/raw/main/img"
 
-# 分组名：产物固定用一个分组，导入播放器后就是"广西移动"这一栏。
+# 分组名：R22 起由 classify_channel() 动态给出（原生分类字段 → 正则规则）。
+#   这个常量仅作**兜底/占位**用途：build_m3u 的 tag 参数默认值、
+#   以及频道名缺失时的占位名前缀（`{tag}-{i}`）。
+#   R22 之前所有频道都归到这一栏；现在只留给"连规则都没命中"的最后兜底。
 M3U_GROUP = "广西移动"
 
 # ================================================================ R21 台标直采
@@ -249,6 +252,244 @@ _QUALITY_RE = r"(高清|超高清|标清|蓝光|超清|4K|8K|HD|SD|2\.5M|4M|8M|�
 #   "广西卫视" -> "广西" -> GUANGXI（库里若有就是短拼音）
 #   "凤凰中文台" -> "凤凰中文" -> FENGHUANGZHONGWEN
 _CHANNEL_SUFFIX_RE = re.compile(r"(卫视|电视台|频道|台|套)$")
+
+
+# ================================================================ R22 频道分类
+# 【R22 要解决的问题】
+#   R21 之前，产物里所有频道都写死 `group-title="广西移动"` —— 导入播放器后
+#   全挤在一栏，275 条里找"CCTV-5"要滚很久。R22 改为**按内容动态分类**。
+#
+# 【为什么优先读原生分类字段】
+#   上游若给分类字段，那是权威的、随源站变更自动跟随的，**零维护**——
+#   与 R21 台标改走直采是同一个理由。可惜实测（2026-09-23，EPG 305 条）
+#   上游返回的字段只有 10 个：
+#     channelIcon / channelName / coverImgUrl / livePlayUrl / logo /
+#     no / onplay / urlid / usable / uuid
+#   **零个**分类字段（category / genre / channelType / type 都没有）。
+#   所以正则规则是**当前唯一可用**的路径，原生字段那一支是"将来上游给了
+#   就能自动受益"的预留。
+#
+# 【分类字段候选名】按"见过 / 业界常见"排序，任一非空即采信。
+NATIVE_CATEGORY_KEYS = (
+    "category", "categoryName", "channelCategory", "channelType",
+    "genre", "genreName", "typeName", "classify", "className",
+    "programType", "channelGroup", "groupName", "tags",
+)
+
+# 规范分组名（产物里实际出现的 group-title 值）。
+#   顺序 = 播放器里的栏目顺序，**刻意把央视/卫视/本地放前面** ——
+#   这三类占实际收看时长的大头。
+G_CCTV = "央视"
+G_WEISHI = "卫视"
+G_GX = "广西地方"
+G_YINGSHI = "影视剧场"
+G_TIYU = "体育"
+G_SHAOER = "少儿卡通"
+G_JILU = "纪录纪实"
+G_XINWEN = "新闻资讯"
+G_GOUWU = "购物生活"
+G_ZONGYI = "综艺生活"
+G_QITA = "其他"
+
+# 分组展示顺序（GROUP_ORDER）—— 也用于测试断言"至少 3 个分组"。
+GROUP_ORDER = (G_CCTV, G_WEISHI, G_GX, G_YINGSHI, G_TIYU,
+               G_SHAOER, G_JILU, G_XINWEN, G_GOUWU, G_ZONGYI, G_QITA)
+
+# 【正则规则表 —— 有序，先命中先归类】
+#
+# 【为什么顺序至关重要（这是本模块最容易改坏的地方）】
+#   同一条频道名可能命中多条规则，归到哪一组**完全由顺序决定**。三条铁律：
+#
+#   ① 央视规则必须**最前**且用 `^` 锚定。
+#      否则 "CCTV-9(英)" 里的"英"、"CCTV-11戏曲"里的"戏曲"会先被别的规则抢走；
+#      而 H265-CCTV-2 这种带厂商前缀的，必须先剥前缀再锚定，故用 `^(?:H265…)?`。
+#
+#   ② 广西地方必须**早于**"新闻/公共/综合"。
+#      否则 "南宁新闻综合" 会被新闻资讯先抢走，"北海经济科教" 会被购物生活抢走 ——
+#      但它们显然该归本地。这是实测踩出来的：规则顺序调一次，广西地方从
+#      25 条涨到 77 条，全是被后面那些泛规则抢走的。
+#
+#   ③ 纪实必须**早于**少儿。
+#      否则 "金鹰纪实" 会被"金鹰"（少儿规则）抢走 —— 它其实是纪录片。
+#
+#   ⚠️ 改动本表后**必须重跑** test_gx_epg_fetch.py 的分类断言，
+#      特别是"零频道落空"与"无空组"两条。
+_CLASSIFY_RULES = (
+    # 1) 央视 / 国台。`^` 锚定 + 可选厂商前缀。CGTN 是央视旗下国际频道，一并归此。
+    (G_CCTV, r"^(?:H265[-_ ]*)?(?:CCTV|央视|中央电视|中国国际电视台|CGTN|CCTVNEWS)"),
+    # 2) 广西地方。含 14 个地市名 + 本地栏目/景区/品牌词（慢享、乐思购、龙胜…）。
+    (G_GX, r"(广西|南宁|柳州|桂林|梧州|北海|玉林|百色|贺州|河池|来宾|崇左"
+           r"|贵港|钦州|防城港|邕城|漓江|两江四湖|遇龙河|慢享|南丹|乐思购|龙胜)"),
+    # 3) 纪录纪实。**必须在少儿之前**（金鹰纪实 vs 金鹰卡通）。
+    (G_JILU, r"(纪实|记录|纪录|探索|地理|发现|自然|历史|博物)"),
+    # 4) 少儿卡通。
+    (G_SHAOER, r"(卡通|少儿|优漫|炫动|金鹰|嘉佳|卡酷|动漫|KAKU|亲子|萌宠)"),
+    # 5) 体育。
+    (G_TIYU, r"(体育|赛事|足球|篮球|武搏|冬奥|电竞|运动|高尔夫|台球|网球|功夫)"),
+    # 6) 影视剧场。
+    (G_YINGSHI, r"(电影|剧场|影视|影院|剧集|电视剧|动作|家庭影院|CHC|DOX"
+                r"|热播|大剧|喜剧|悬疑|惊悚|古装|爱情)"),
+    # 7) 购物生活（含教育/科教 —— 实测中国教育1套、山东教育都落这里）。
+    (G_GOUWU, r"(购物|家有|优购物|生活|健康|时尚|美妆|旅游|美食|居家|房产|教育|科教)"),
+    # 8) 新闻资讯（含凤凰系、农业致富）。**必须在卫视之前**，
+    #    否则 "凤凰中文台" 不受影响，但 "广西卫视" 已被规则2 抢走。
+    (G_XINWEN, r"(新闻|资讯|评论|财经|经济|天气|公共|都市|综合|凤凰|致富|农业)"),
+    # 9) 卫视。**放这么后是刻意的**：本地卫视（广西卫视）已被规则 2 归到广西地方，
+    #    这里只兜其它省级卫视（北京卫视 / 江苏卫视 / 湖南卫视 …）。
+    #    若把它提前，广西卫视会从"广西地方"跑到"卫视"，反而降低本地产的聚合度。
+    (G_WEISHI, r"(卫视)"),
+    # 10) 综艺生活。放最后：这些词（精品/纯享/）比较泛，早早命中会误伤。
+    (G_ZONGYI, r"(综艺|广场舞|炫舞|乘风|奇遇|纯享|金牌|嗨看|潮妈|辣婆|精品)"),
+)
+
+
+def category_of_native(ch: Dict[str, Any]) -> str:
+    """
+    从原始频道 dict 里尝试读**原生分类字段**。
+
+    【为什么要单独一个函数】
+      "优先读原生字段"是本模块的第一优先级，但上游当前不给（见模块头注释）。
+      把它独立出来，将来上游真给了分类字段，只要这里返回非空，整条链路
+      就自动切到原生分类 —— **不需要改 classify_channel 的任何调用方**。
+
+    Args:
+        ch: 原始频道 dict。
+
+    Returns:
+        原生分类名（已 strip）；没有则空串。
+    """
+    for k in NATIVE_CATEGORY_KEYS:
+        v = ch.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        # 有些接口把分类放在数组里（tags: ["体育", "高清"]）
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+    return ""
+
+
+def classify_channel(name: str, native: str = "") -> str:
+    """
+    把一个频道名归入规范分组。
+
+    【优先级】
+      1. 原生分类字段（native 非空）—— 若它在规范组里，直接用；
+         不在规范组里也直接用（尊重上游，不强行改写），只是会有个新栏目。
+      2. 正则规则表，**有序命中即返回**（顺序铁律见 _CLASSIFY_RULES 注释）。
+      3. 兜底 G_QITA —— **保证零落空**，任何名字都必有归宿。
+
+    【为什么"零落空"是硬要求】
+      分类漏掉一条频道，它在播放器里就凭空消失（或挤进无名分组）。
+      所以本函数**在任何输入下都返回非空字符串**，绝不抛异常、绝不返回空。
+      测试里对 275 条真实名字逐条断言非空。
+
+    Args:
+        name: 频道名（原始，可含画质/码率修饰）。
+        native: 原生分类字段值（可选）。
+
+    Returns:
+        规范分组名，保证非空。
+    """
+    if native:
+        return native
+    # 先剥画质修饰再匹配？——**不剥**。理由：实测 "广西卫视8M高清" 剥完是
+    # "广西卫视"，匹配结果一样；但 "CCTV-16 4K" 剥掉 "4K" 会变成 "CCTV-16 "，
+    # 而某些名字剥完只剩空串。不剥更安全，规则本身已能扛住修饰词。
+    s = (name or "").strip()
+    if not s:
+        return G_QITA
+    for group, pat in _CLASSIFY_RULES:
+        if re.search(pat, s, re.I):
+            return group
+    return G_QITA
+
+
+def classify_map(urls: List[str],
+                 name_by_url: Optional[Dict[str, str]] = None,
+                 channels: Optional[List[Dict[str, Any]]] = None
+                 ) -> Dict[str, str]:
+    """
+    批量算出 url -> 规范分组名 映射（供 build_m3u 使用）。
+
+    【为什么按 url 建映射、而不是在 build_m3u 里现算】
+      同一批直链要进两个产物（精简轨 / 全集轨），若两处各自现算，
+      万一规则顺序被改、或 native 字段这次有下次没有，**两轨分类会不一致**。
+      先算好一份映射、两轨共用，与 R21.2 "同一目录只留一个变量"是同一种
+      "消灭重复真相源"的思路。
+
+    【native 字段怎么与 url 对上】
+      channels 是原始 dict 列表（含 livePlayUrl + 分类字段 + channelName）。
+      这里把 (url -> native分类) 先建出来，再与 name_by_url 合并。
+      对不上的（url 不在 channels 里）退回纯正则，不影响正确性。
+
+    Args:
+        urls: 直链列表。
+        name_by_url: url -> 频道名映射。
+        channels: 原始频道 dict 列表（用于读原生分类字段）。
+
+    Returns:
+        {url: 分组名}，覆盖 urls 里每一个元素（零落空）。
+    """
+    name_by_url = name_by_url or {}
+    # url -> 原生分类（尽力而为；上游当前不提供时这个 dict 是空的）
+    native_by_url: Dict[str, str] = {}
+    for c in (channels or []):
+        if not isinstance(c, dict):
+            continue
+        u = ""
+        for k in ("livePlayUrl", "zteurl", "hwurl", "url", "playUrl",
+                  "playurl", "liveUrl", "channelUrl"):
+            v = c.get(k)
+            if isinstance(v, str) and v.strip():
+                u = v.strip()
+                break
+        if not u:
+            continue
+        nat = category_of_native(c)
+        if nat:
+            native_by_url[u] = nat
+    out: Dict[str, str] = {}
+    for u in urls:
+        out[u] = classify_channel(name_by_url.get(u, ""),
+                                  native_by_url.get(u, ""))
+    return out
+
+
+def classify_stats(urls: List[str],
+                   group_by_url: Optional[Dict[str, str]] = None
+                   ) -> Dict[str, Any]:
+    """
+    统计各分组的条数（供 CI 断言与日志消费）。
+
+    Args:
+        urls: 直链列表。
+        group_by_url: url -> 分组名。
+
+    Returns:
+        {"counts": {分组: 条数}, "groups": 非空分组数, "empty_groups": [],
+         "total": n, "unclassified": n}
+        `unclassified` 恒为 0（classify_channel 保证零落空），
+        但保留该字段以便断言"确实没落空"。
+    """
+    group_by_url = group_by_url or {}
+    counts: Dict[str, int] = {}
+    unclassified = 0
+    for u in urls:
+        g = group_by_url.get(u)
+        if not g:
+            unclassified += 1
+            continue
+        counts[g] = counts.get(g, 0) + 1
+    empty_groups = [g for g in GROUP_ORDER if counts.get(g, 0) == 0]
+    return {
+        "counts": counts,
+        "groups": sum(1 for g in GROUP_ORDER if counts.get(g, 0) > 0),
+        "empty_groups": empty_groups,
+        "total": len(urls),
+        "unclassified": unclassified,
+    }
 
 
 def is_valid_channel_url(url: str) -> bool:
@@ -930,16 +1171,24 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
               index: Optional[Dict[str, str]] = None,
               direct_icons: Optional[Dict[str, str]] = None,
               enable_catchup: bool = CATCHUP_ENABLED_DEFAULT,
-              stats_out: Optional[Dict[str, Any]] = None) -> str:
+              stats_out: Optional[Dict[str, Any]] = None,
+              group_by_url: Optional[Dict[str, str]] = None) -> str:
     """
-    生成 m3u 播放列表（R21 备用源格式）。
+    生成 m3u 播放列表（R21 备用源格式，R22 动态分类）。
 
     【格式规格】
       #EXTM3U
       # exTVLCOPT:http-user-agent=<UA>     ← VLC 系播放器会读这行
       # UA: <UA>                            ← 纯注释，给人和其它播放器看
-      #EXTINF:-1 group-title="广西移动" tvg-logo="<图标URL>",<频道名>
+      #EXTINF:-1 group-title="<分类>" tvg-logo="<图标URL>",<频道名>
       <直链>
+
+    【R22 变更点 —— group-title 从写死变动态】
+      旧：所有行都是 group-title="广西移动"（常量 tag）。
+      新：每条按 group_by_url[u] 取自己的分类名；**没给的退回 tag**
+          （向后兼容：老调用方不传 group_by_url 时行为与 R21 完全一致）。
+      ⚠️ 只改 group-title 的值，**格式本身一个字不动** ——
+         逗号仍只有一个、属性间仍用空格、tvg-logo 仍可能在逗号前缺席。
 
     【R21 变更点】
       1. 台标双通道：direct_icons（直采 channelIcon）优先，Gitee 兜底。
@@ -970,35 +1219,51 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
     【频道名里的引号】
       频道名可能含 `"`（实测没有，但接口是外部的）。统一替换成全角引号，
       避免把 #EXTINF 行的属性语法打破 —— 格式正确比保留原字符重要。
+      分组名同理做替换（分组名来自规则表或上游，理论上更干净，
+      但上游 native 字段是不可信输入，一并转义）。
 
     Args:
         urls: 直链列表（应已过 is_valid_channel_url 过滤）。
         name_by_url: url → 频道名映射。
-        tag: group-title 值。
+        tag: **兜底** group-title 值（group_by_url 缺该 url 时用）。
         ua: User-Agent，同时进注释行与 exTVLCOPT。
         index: Gitee 兜底匹配索引，透传给 get_logo_url。
         direct_icons: 直采映射 {url: channelIcon}，优先于 index。
         enable_catchup: 是否注入时移参数。默认 False。
         stats_out: 非 None 时回填 {"direct": n, "fallback": n} 统计。
+        group_by_url: url → 分类名（R22）。缺省时全部用 tag。
 
     Returns:
         m3u 文本（以换行结尾）。
     """
     name_by_url = name_by_url or {}
     direct_icons = direct_icons or {}
+    group_by_url = group_by_url or {}
+    # 头部注释里的"分组"若有多组，列出来更有用；一组时保持原样。
+    _groups = []
+    for u in urls:
+        g = group_by_url.get(u) or tag
+        if g not in _groups:
+            _groups.append(g)
+    _group_desc = tag if len(_groups) <= 1 else f"{len(_groups)} 组"
     lines = [
         "#EXTM3U",
         f"# exTVLCOPT:http-user-agent={ua}",
         f"# UA: {ua}",
-        f"# 由 iptv 项目 R21 生成 · 分组={tag} · {len(urls)} 条",
+        f"# 由 iptv 项目 R22 生成 · 分组={_group_desc} · {len(urls)} 条",
     ]
     n_direct = 0
     n_fallback = 0
     for i, u in enumerate(urls, 1):
-        raw = name_by_url.get(u) or f"{tag}-{i}"
+        # 这条频道自己的分组：优先 group_by_url，缺省退回 tag（向后兼容）
+        own_tag = group_by_url.get(u) or tag
+        raw = name_by_url.get(u) or f"{own_tag}-{i}"
         # 引号/逗号转全角：频道名若含 " 或 , 会破坏 #EXTINF 的属性语法
         # （逗号还兼任"显示名分隔符"，必须最优先处理）。
         n = raw.replace('"', "＂").replace(",", "，")
+        # 分组名同样转义：native 字段来自上游，属不可信输入，
+        # 若含引号会直接把 group-title 属性语法打破。
+        t = own_tag.replace('"', "＂").replace(",", "，")
         # 【离产物最近的一层防线：图标逻辑无论怎么炸，都不能影响产出】
         #   resolve_logo 内部已兜两层（直采无异常 + 兜底 try）；
         #   这里是第三层。三层看着冗余，但代价是 0（异常路径永不触发），
@@ -1021,7 +1286,7 @@ def build_m3u(urls: List[str], name_by_url: Optional[Dict[str, str]] = None,
         # 【逗号只有一个】：属性区（group-title / tvg-logo）用空格分隔，
         # 逗号之后是显示名。这是 m3u 规范，任何播放器都能正确取到频道名。
         logo_part = f' tvg-logo="{logo}"' if logo else ""
-        lines.append(f'#EXTINF:-1 group-title="{tag}"{logo_part},{n}')
+        lines.append(f'#EXTINF:-1 group-title="{t}"{logo_part},{n}')
         lines.append(url_out)
     if stats_out is not None:
         stats_out["direct"] = n_direct
@@ -1281,6 +1546,18 @@ def main() -> int:
         clean_urls, full_urls = split_tracks(res["urls"], name_by_url)
         stats: Dict[str, Any] = {}
 
+        # 【R22：分类映射**一次算好、两轨共用**】
+        #   为什么不各自算：同一批直链要进两个产物，若两处分别调
+        #   classify_map，一旦规则表被改、或 native 字段这次有下次没有，
+        #   **两轨的分类就会不一致** —— 播放器里同一个台在精简轨归"央视"、
+        #   在全集轨归"其他"，看起来像两份不相干的播放列表。
+        #   先算一份共用，与 R21.2"同一目录只留一个变量"同一种思路：
+        #   **消灭重复真相源**。
+        group_by_url = classify_map(res["urls"], name_by_url,
+                                    res.get("channels") or [])
+        # 分类统计（供 CI 断言与日志；按全集轨算，它才是全体本）
+        cls = classify_stats(full_urls, group_by_url)
+
         # 【--tracks 语义：目录，不是"文件前缀"】
         #   R21.1 前的写法是 os.path.dirname(os.path.abspath(args.tracks))，
         #   它把参数当"某个文件的路径"取其父目录 —— 于是传 "out" 得到 "",
@@ -1295,7 +1572,8 @@ def main() -> int:
         clean_txt = build_m3u(clean_urls, name_by_url,
                               direct_icons=direct_icons,
                               enable_catchup=args.enable_catchup,
-                              stats_out=stats)
+                              stats_out=stats,
+                              group_by_url=group_by_url)
         with open(clean_path, "w", encoding="utf-8") as f:
             f.write(clean_txt)
         # 全集轨单独统计（命中率断言以全集轨为分母，它才是全体本）
@@ -1303,7 +1581,8 @@ def main() -> int:
         full_txt = build_m3u(full_urls, name_by_url,
                              direct_icons=direct_icons,
                              enable_catchup=args.enable_catchup,
-                             stats_out=full_stats)
+                             stats_out=full_stats,
+                             group_by_url=group_by_url)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(full_txt)
 
@@ -1314,6 +1593,22 @@ def main() -> int:
         print(f"[*] 双轨已写入：", file=sys.stderr)
         print(f"    {clean_path}  精简轨 {len(clean_urls)} 条", file=sys.stderr)
         print(f"    {full_path}  全集轨 {len(full_urls)} 条", file=sys.stderr)
+        # 【R22 分类日志】按 GROUP_ORDER 顺序打印，一眼看出哪组有多少条。
+        print(f"[*] 分类分布（分母=全集轨 {cls['total']}，"
+              f"{cls['groups']} 组非空）：", file=sys.stderr)
+        for g in GROUP_ORDER:
+            cnt = cls["counts"].get(g, 0)
+            mark = "  " if cnt else "[空]"
+            print(f"    {mark} {g:<6} {cnt:>4}", file=sys.stderr)
+        if cls["unclassified"]:
+            # 理论恒为 0（classify_channel 保证零落空）。真出现说明
+            # group_by_url 没覆盖某个 url —— 属**代码缺陷**，必须显眼。
+            print(f"[!] 有 {cls['unclassified']} 条频道未分类"
+                  "（不应发生，请核查 classify_map 覆盖面）", file=sys.stderr)
+        if cls["empty_groups"]:
+            # 空组不致命（某些源本来就没有体育台），但值得一眼看到。
+            print(f"[~] 空分组：{'、'.join(cls['empty_groups'])}"
+                  "（该批源里没有这类频道，属正常）", file=sys.stderr)
         print(f"[*] 台标命中率（分母=全集轨 {st['total']}）：", file=sys.stderr)
         print(f"    直采 {st['direct']}  兜底 {st['fallback']}  "
               f"合计 {st['combined']}", file=sys.stderr)
