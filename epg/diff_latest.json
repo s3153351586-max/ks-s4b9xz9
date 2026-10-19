@@ -1,6 +1,6 @@
 {
   "version": "r18",
-  "generated_at": "2026-10-18T10:09:32.240305+08:00",
+  "generated_at": "2026-10-19T10:25:45.778830+08:00",
   "normalization_rule": "strip-query+strip-trailing-slash",
   "epg_stage": "ok",
   "epg_ok": true,
