@@ -1,0 +1,216 @@
+{
+  "version": "v4.2",
+  "timestamp": "2026-10-20T02:39:06.523479",
+  "probe_location": "cloud",
+  "summary": {
+    "total": 9,
+    "counted": 6,
+    "skipped": 3,
+    "alertable": 6,
+    "ok_list": 3,
+    "fail_list": 2,
+    "total_list": 5,
+    "ok_stream": 1,
+    "fail_stream": 0,
+    "total_stream": 1,
+    "scopes": {
+      "public": {
+        "total": 6,
+        "ok": 4,
+        "fail": 2,
+        "ok_list": 3,
+        "total_list": 5,
+        "ok_stream": 1,
+        "total_stream": 1
+      },
+      "intranet": {
+        "total": 0,
+        "ok": 0,
+        "fail": 0,
+        "ok_list": 0,
+        "total_list": 0,
+        "ok_stream": 0,
+        "total_stream": 0
+      },
+      "baseline": {
+        "total": 0,
+        "ok": 0,
+        "fail": 0,
+        "ok_list": 0,
+        "total_list": 0,
+        "ok_stream": 0,
+        "total_stream": 0
+      },
+      "ecosystem": {
+        "total": 0,
+        "ok": 0,
+        "fail": 0,
+        "ok_list": 0,
+        "total_list": 0,
+        "ok_stream": 0,
+        "total_stream": 0
+      }
+    },
+    "network": {
+      "status": "net_unknown",
+      "state": "net_unknown",
+      "label": "无网络基线数据",
+      "semantic": "网络基线缺失或不足，无法判定本机网络健康",
+      "action": "不抑制源告警（无基线时不拿它当挡箭牌）",
+      "suppress_alarms": false,
+      "suppress": false,
+      "detail": "未探测 baseline 组"
+    },
+    "intranet": {
+      "status": "eco_down",
+      "label": "移动生态域不可达",
+      "detail": "连运营商公网生态域都不可达（网络基线尚可）→ 疑似 DNS/路由/污染，二级战备：换 DNS 或切通道",
+      "alias": "intranet_down"
+    },
+    "changes": {
+      "recovered": [],
+      "broken": [],
+      "new": []
+    }
+  },
+  "targets": [
+    {
+      "id": "A1",
+      "name": "raw",
+      "kind": "list",
+      "scope": "public",
+      "status": 200,
+      "ok": true,
+      "latency_ms": 154,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": null,
+      "hint": null
+    },
+    {
+      "id": "A2",
+      "name": "gh-proxy",
+      "kind": "list",
+      "scope": "public",
+      "status": 200,
+      "ok": true,
+      "latency_ms": 165,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": null,
+      "hint": null
+    },
+    {
+      "id": "A3",
+      "name": "kkgithub",
+      "kind": "list",
+      "scope": "public",
+      "status": null,
+      "ok": false,
+      "latency_ms": 1044,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": "dns",
+      "hint": null
+    },
+    {
+      "id": "A4",
+      "name": "jsdelivr",
+      "kind": "list",
+      "scope": "public",
+      "status": 200,
+      "ok": true,
+      "latency_ms": 630,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": null,
+      "hint": null
+    },
+    {
+      "id": "A5",
+      "name": "gitee",
+      "kind": "list",
+      "scope": "public",
+      "status": 403,
+      "ok": false,
+      "latency_ms": 1300,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": "http_4xx",
+      "hint": null
+    },
+    {
+      "id": "B1",
+      "name": "移动CDN主链（手机侧动态）",
+      "kind": "stream",
+      "scope": "intranet",
+      "status": null,
+      "ok": false,
+      "latency_ms": null,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": "skip_cloud",
+      "hint": "内网源，云端不可测，交由本地探针"
+    },
+    {
+      "id": "B1b",
+      "name": "移动CDN副链（手机侧动态）",
+      "kind": "stream",
+      "scope": "intranet",
+      "status": null,
+      "ok": false,
+      "latency_ms": null,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": "skip_cloud",
+      "hint": "内网源，云端不可测，交由本地探针"
+    },
+    {
+      "id": "B2",
+      "name": "全国备用(代理)",
+      "kind": "stream",
+      "scope": "public",
+      "status": 200,
+      "ok": true,
+      "latency_ms": null,
+      "ttfb_ms": 100,
+      "speed_kbps": 17088.5,
+      "change": null,
+      "error": null,
+      "hint": "该地址含522个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
+    },
+    {
+      "id": "B2i",
+      "name": "移动生态域(公网EPG)",
+      "kind": "head",
+      "scope": "ecosystem",
+      "status": null,
+      "ok": false,
+      "latency_ms": null,
+      "ttfb_ms": null,
+      "speed_kbps": null,
+      "change": null,
+      "error": "skip_cloud",
+      "hint": "内网源，云端不可测，交由本地探针"
+    }
+  ],
+  "meta": {
+    "location": "cloud",
+    "scope_filter": null,
+    "proxy": null,
+    "insecure": false,
+    "variant_strategy": "max",
+    "segment_strategy": "last",
+    "per_host": 4,
+    "timeout": 8.0,
+    "max_bytes": 524288,
+    "max_sec": 3.0
+  }
+}
