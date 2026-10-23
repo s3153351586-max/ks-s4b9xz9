@@ -1,7 +1,7 @@
 {
   "version": "v4.2",
-  "published_at": "2026-10-22T10:29:54.835698+08:00",
-  "cloud_timestamp": "2026-10-22T02:29:48.188424",
+  "published_at": "2026-10-23T10:34:35.991386+08:00",
+  "cloud_timestamp": "2026-10-23T02:34:31.543756",
   "cloud_ok_stream": 1,
   "cloud_total_stream": 1,
   "cloud_ok_list": 3,
@@ -13,9 +13,9 @@
   "intranet_status": null,
   "epg_drift": {
     "epg_count": 276,
-    "healer_count": 147,
-    "intersect": 118,
-    "jaccard": 0.3869,
+    "healer_count": 149,
+    "intersect": 120,
+    "jaccard": 0.3934,
     "worst": "none",
     "warmup": true,
     "rules": {
@@ -38,7 +38,7 @@
     "alarms_total": 0,
     "suppressed_total": 0,
     "pending_total": 0,
-    "first_run_at": "2026-10-22T10:29:54.835690+08:00",
+    "first_run_at": "2026-10-23T10:34:35.991376+08:00",
     "push_successes": 0,
     "push_failures": 0,
     "push_last_error": null
