@@ -1,20 +1,20 @@
 {
   "version": "r18",
-  "generated_at": "2026-09-23T19:49:56.448111+08:00",
+  "generated_at": "2026-10-24T10:32:43.926958+08:00",
   "normalization_rule": "strip-query+strip-trailing-slash",
   "epg_stage": "ok",
   "epg_ok": true,
   "healer_fetch_ok": true,
-  "epg_count": 275,
-  "healer_count": 147,
-  "intersect": 118,
-  "epg_only_count": 157,
+  "epg_count": 276,
+  "healer_count": 149,
+  "intersect": 120,
+  "epg_only_count": 156,
   "healer_only_count": 29,
-  "union_count": 304,
-  "jaccard": 0.3882,
+  "union_count": 305,
+  "jaccard": 0.3934,
   "placeholder_count": 1,
   "multi_name_groups": 4,
-  "raw_channel_count": 305,
+  "raw_channel_count": 306,
   "channel_names_top": [],
   "baseline": {
     "warmup": true,
@@ -38,7 +38,7 @@
     "worst": "none"
   },
   "meta": {
-    "healer_fetch_note": "OK 42638B",
-    "note": "Healer m3u 抽到 147 条直链"
+    "healer_fetch_note": "OK 43241B",
+    "note": "Healer m3u 抽到 149 条直链"
   }
 }
