@@ -1,7 +1,7 @@
 {
   "version": "v4.2",
-  "published_at": "2026-11-10T13:16:07.789096+08:00",
-  "cloud_timestamp": "2026-11-10T05:16:03.123562",
+  "published_at": "2026-11-11T11:47:53.828948+08:00",
+  "cloud_timestamp": "2026-11-11T03:47:49.309725",
   "cloud_ok_stream": 1,
   "cloud_total_stream": 1,
   "cloud_ok_list": 3,
@@ -38,7 +38,7 @@
     "alarms_total": 0,
     "suppressed_total": 0,
     "pending_total": 0,
-    "first_run_at": "2026-11-10T13:16:07.789086+08:00",
+    "first_run_at": "2026-11-11T11:47:53.828940+08:00",
     "push_successes": 0,
     "push_failures": 0,
     "push_last_error": null
