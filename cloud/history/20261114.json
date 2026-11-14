@@ -1,6 +1,6 @@
 {
   "version": "v4.2",
-  "timestamp": "2026-10-14T02:44:15.921227",
+  "timestamp": "2026-11-14T04:05:17.976973",
   "probe_location": "cloud",
   "summary": {
     "total": 9,
@@ -81,7 +81,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 101,
+      "latency_ms": 134,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -95,7 +95,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 282,
+      "latency_ms": 203,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -109,11 +109,11 @@
       "scope": "public",
       "status": null,
       "ok": false,
-      "latency_ms": 1615,
+      "latency_ms": 652,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
-      "error": "dns",
+      "error": "conn",
       "hint": null
     },
     {
@@ -123,7 +123,7 @@
       "scope": "public",
       "status": 200,
       "ok": true,
-      "latency_ms": 717,
+      "latency_ms": 442,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -137,7 +137,7 @@
       "scope": "public",
       "status": 403,
       "ok": false,
-      "latency_ms": 6674,
+      "latency_ms": 2303,
       "ttfb_ms": null,
       "speed_kbps": null,
       "change": null,
@@ -180,11 +180,11 @@
       "status": 200,
       "ok": true,
       "latency_ms": null,
-      "ttfb_ms": 141,
-      "speed_kbps": 30761.5,
+      "ttfb_ms": 201,
+      "speed_kbps": 17497.9,
       "change": null,
       "error": null,
-      "hint": "该地址含526个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
+      "hint": "该地址含427个#EXTINF，疑似频道列表(m3u)，建议改用 type=list"
     },
     {
       "id": "B2i",
