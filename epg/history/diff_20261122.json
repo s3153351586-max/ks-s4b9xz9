@@ -1,20 +1,20 @@
 {
   "version": "r18",
-  "generated_at": "2026-10-22T10:29:54.530766+08:00",
+  "generated_at": "2026-11-22T12:05:25.288082+08:00",
   "normalization_rule": "strip-query+strip-trailing-slash",
   "epg_stage": "ok",
   "epg_ok": true,
-  "healer_fetch_ok": true,
-  "epg_count": 276,
-  "healer_count": 147,
-  "intersect": 118,
-  "epg_only_count": 158,
-  "healer_only_count": 29,
-  "union_count": 305,
-  "jaccard": 0.3869,
+  "healer_fetch_ok": false,
+  "epg_count": 275,
+  "healer_count": 0,
+  "intersect": 0,
+  "epg_only_count": 275,
+  "healer_only_count": 0,
+  "union_count": 275,
+  "jaccard": 0.0,
   "placeholder_count": 1,
   "multi_name_groups": 4,
-  "raw_channel_count": 306,
+  "raw_channel_count": 305,
   "channel_names_top": [],
   "baseline": {
     "warmup": true,
@@ -29,16 +29,16 @@
   "drift": {
     "R-a": false,
     "R-a_detail": "",
-    "R-b": false,
-    "R-b_detail": "",
+    "R-b": true,
+    "R-b_detail": "Healer 上游不可用或形态异常（拉取失败/无 #EXTM3U/0 直链）",
     "R-c": false,
     "R-c_detail": "",
     "R-d": false,
     "R-d_detail": "",
-    "worst": "none"
+    "worst": "critical"
   },
   "meta": {
-    "healer_fetch_note": "OK 42638B",
-    "note": "Healer m3u 抽到 147 条直链"
+    "healer_fetch_note": "HTTPError: HTTP Error 403: Forbidden",
+    "note": "Healer 列表拉取失败或为空"
   }
 }
