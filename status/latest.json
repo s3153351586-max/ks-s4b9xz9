@@ -1,28 +1,26 @@
 {
   "version": "v4.2",
-  "published_at": "2026-11-22T12:05:25.557916+08:00",
-  "cloud_timestamp": "2026-11-22T04:05:18.697671",
-  "cloud_ok_stream": 0,
+  "published_at": "2026-11-23T12:46:49.919247+08:00",
+  "cloud_timestamp": "2026-11-23T04:46:45.785101",
+  "cloud_ok_stream": 1,
   "cloud_total_stream": 1,
-  "cloud_ok_list": 2,
+  "cloud_ok_list": 3,
   "cloud_total_list": 5,
   "verdicts": {},
-  "alarms": [
-    "EPG-R-b"
-  ],
+  "alarms": [],
   "suppressed": [],
   "network_state": "net_unknown",
   "intranet_status": null,
   "epg_drift": {
     "epg_count": 275,
-    "healer_count": 0,
-    "intersect": 0,
-    "jaccard": 0.0,
-    "worst": "critical",
+    "healer_count": 146,
+    "intersect": 117,
+    "jaccard": 0.3849,
+    "worst": "none",
     "warmup": true,
     "rules": {
       "R-a": false,
-      "R-b": true,
+      "R-b": false,
       "R-c": false,
       "R-d": false
     }
@@ -40,16 +38,16 @@
     "alarms_total": 0,
     "suppressed_total": 0,
     "pending_total": 0,
-    "first_run_at": "2026-11-22T12:05:25.557906+08:00",
+    "first_run_at": "2026-11-23T12:46:49.919240+08:00",
     "push_successes": 0,
     "push_failures": 0,
     "push_last_error": null
   },
   "run_id": 1,
   "notify": {
-    "prev_state": "ok",
-    "state": "alarm",
+    "prev_state": "alarm",
+    "state": "ok",
     "sent": true,
-    "kind": "first_alarm"
+    "kind": "recover"
   }
 }
